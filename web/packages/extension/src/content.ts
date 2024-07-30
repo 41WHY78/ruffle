@@ -93,8 +93,7 @@ function checkPageOptout(): boolean {
     }
     try {
         if (
-            window.top &&
-            window.top.document &&
+            window.top?.document &&
             window.top.document.documentElement &&
             window.top.document.documentElement.hasAttribute(
                 "data-ruffle-optout",

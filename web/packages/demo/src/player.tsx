@@ -24,7 +24,7 @@ export class Player extends React.Component<PlayerAttributes> {
     // [NA] Ruffle has a bug where if you load a swf whilst it's already loading another swf, it breaks
     // Combine this with React testing everything by loading things twice to catch bugs - well, they caught the bug for sure.
     // This is a hacky workaround.
-    private isLoading: boolean = false;
+    private isLoading = false;
 
     constructor(props: PlayerAttributes) {
         super(props);

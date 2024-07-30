@@ -908,7 +908,7 @@ export class RufflePlayer extends HTMLElement {
      */
     async load(
         options: string | URLLoadOptions | DataLoadOptions,
-        isPolyfillElement: boolean = false,
+        isPolyfillElement = false,
     ): Promise<void> {
         options = this.checkOptions(options);
 

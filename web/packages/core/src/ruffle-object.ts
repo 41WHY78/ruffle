@@ -199,7 +199,7 @@ export class RuffleObject extends RufflePlayer {
                 return false;
             }
             filename = data;
-        } else if (params && params["movie"]) {
+        } else if (params?.["movie"]) {
             // Don't polyfill when the file is a YouTube Flash source.
             if (isYoutubeFlashSource(params["movie"])) {
                 // Workaround YouTube mixed content; this isn't what browsers do automatically, but while we're here, we may as well.

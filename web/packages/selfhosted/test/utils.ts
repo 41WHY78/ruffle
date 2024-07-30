@@ -87,7 +87,7 @@ export async function injectRuffle(browser: WebdriverIO.Browser) {
 export async function playAndMonitor(
     browser: WebdriverIO.Browser,
     player: WebdriverIO.Element,
-    expectedOutput: string = "Hello from Flash!\n",
+    expectedOutput = "Hello from Flash!\n",
 ) {
     await throwIfError(browser);
     await waitForPlayerToLoad(browser, player);
@@ -163,7 +163,7 @@ export async function waitForPlayerToLoad(
 export async function openTest(
     browser: WebdriverIO.Browser,
     directory: string,
-    filename: string = "index.html",
+    filename = "index.html",
 ) {
     await browser.url(`http://localhost:4567/test/${directory}/${filename}`);
 }

@@ -531,7 +531,7 @@ var swfobject = function() {
     }
 
     function isElement(id){
-        return (id && id.nodeType && id.nodeType === 1);
+        return (id?.nodeType && id.nodeType === 1);
     }
 
     function getId(thing){

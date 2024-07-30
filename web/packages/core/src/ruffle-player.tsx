@@ -654,8 +654,7 @@ export class RufflePlayer extends HTMLElement {
             );
         }
         if (
-            this.loadedConfig &&
-            this.loadedConfig.maxExecutionDuration &&
+            this.loadedConfig?.maxExecutionDuration &&
             typeof this.loadedConfig.maxExecutionDuration !== "number"
         ) {
             console.warn(
@@ -1213,8 +1212,7 @@ export class RufflePlayer extends HTMLElement {
             }
         });
         if (
-            fileInput &&
-            fileInput.files &&
+            fileInput?.files &&
             fileInput.files.length > 0 &&
             fileInput.files[0]
         ) {
@@ -1729,7 +1727,7 @@ export class RufflePlayer extends HTMLElement {
     private audioState(): string {
         if (this.instance) {
             const audioContext = this.instance.audio_context();
-            return (audioContext && audioContext.state) || "running";
+            return (audioContext?.state) || "running";
         }
         return "suspended";
     }

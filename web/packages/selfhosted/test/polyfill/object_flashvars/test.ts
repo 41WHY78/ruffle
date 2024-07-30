@@ -7,7 +7,7 @@ use(chaiHtml);
 
 describe("Object tag", () => {
     it("loads the test", async () => {
-        await openTest(browser, `polyfill/object_flashvars`);
+        await openTest(browser, "polyfill/object_flashvars");
     });
 
     it("polyfills with ruffle", async () => {

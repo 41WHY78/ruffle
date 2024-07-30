@@ -7,7 +7,7 @@ use(chaiHtml);
 
 describe("SWF extension insensitive", () => {
     it("loads the test", async () => {
-        await openTest(browser, `polyfill/swf_extension_insensitive`);
+        await openTest(browser, "polyfill/swf_extension_insensitive");
     });
 
     it("Polyfills", async () => {

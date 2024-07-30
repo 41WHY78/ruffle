@@ -7,7 +7,7 @@ use(chaiHtml);
 
 describe("iframe onload", () => {
     it("loads the test", async () => {
-        await openTest(browser, `polyfill/iframes_onload`);
+        await openTest(browser, "polyfill/iframes_onload");
     });
 
     it("runs the iframe onload event", async () => {

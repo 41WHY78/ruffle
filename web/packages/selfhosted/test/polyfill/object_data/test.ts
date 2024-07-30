@@ -7,7 +7,7 @@ use(chaiHtml);
 
 describe("Object with only data attribute", () => {
     it("loads the test", async () => {
-        await openTest(browser, `polyfill/object_data`);
+        await openTest(browser, "polyfill/object_data");
     });
 
     it("Polyfills", async () => {

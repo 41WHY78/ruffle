@@ -7,7 +7,7 @@ use(chaiHtml);
 
 describe("Remove object", () => {
     it("loads the test", async () => {
-        await openTest(browser, `polyfill/remove_object`);
+        await openTest(browser, "polyfill/remove_object");
     });
 
     it("polyfills with ruffle", async () => {

@@ -7,7 +7,7 @@ use(chaiHtml);
 
 describe("Embed with Flash YouTube video", () => {
     it("loads the test", async () => {
-        await openTest(browser, `polyfill/embed_youtube`);
+        await openTest(browser, "polyfill/embed_youtube");
     });
 
     it("doesn't polyfill with ruffle", async () => {

@@ -7,7 +7,7 @@ use(chaiHtml);
 
 describe("Embed tag", () => {
     it("loads the test", async () => {
-        await openTest(browser, `polyfill/embed_default`);
+        await openTest(browser, "polyfill/embed_default");
     });
 
     it("polyfills with ruffle", async () => {

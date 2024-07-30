@@ -1447,7 +1447,7 @@ export class RufflePlayer extends HTMLElement {
                 items.push({
                     // TODO: better checkboxes
                     text:
-                        item.caption + (item.checked ? ` (${CHECKMARK})` : ``),
+                        item.caption + (item.checked ? ` (${CHECKMARK})` : ""),
                     onClick: async () =>
                         this.instance?.run_context_menu_callback(index),
                     enabled: item.enabled,

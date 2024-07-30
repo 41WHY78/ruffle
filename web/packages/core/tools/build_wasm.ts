@@ -130,7 +130,7 @@ function buildWasm(
     }
 }
 function copyStandIn(from: string, to: string) {
-    const suffixes = [`_bg.wasm`, `_bg.wasm.d.ts`, `.js`, `.d.ts`];
+    const suffixes = ["_bg.wasm", "_bg.wasm.d.ts", ".js", ".d.ts"];
     console.log(`Copying ${from} as a stand-in for ${to}...`);
     for (const suffix of suffixes) {
         copyFileSync(`dist/${from}${suffix}`, `dist/${to}${suffix}`);

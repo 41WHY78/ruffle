@@ -7,7 +7,7 @@ use(chaiHtml);
 
 describe("SWF extension, file with fragment", () => {
     it("loads the test", async () => {
-        await openTest(browser, `polyfill/swf_extension_with_fragment`);
+        await openTest(browser, "polyfill/swf_extension_with_fragment");
     });
 
     it("Polyfills", async () => {

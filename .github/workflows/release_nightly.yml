@@ -89,12 +89,14 @@ jobs:
             target: i686-pc-windows-msvc
             RUSTFLAGS: -Ctarget-feature=+crt-static
             DESKTOP_FEATURES: jpegxr
+            MSI_ARCH: x86
 
           - build_name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             RUSTFLAGS: -Ctarget-feature=+crt-static
             DESKTOP_FEATURES: jpegxr
+            MSI_ARCH: x64
 
     env:
       PACKAGE_FILE: ${{ needs.create-nightly-release.outputs.package_prefix }}-${{ matrix.build_name }}.${{ startsWith(matrix.build_name, 'win') && 'zip' || 'tar.gz' }}
@@ -117,6 +119,13 @@ jobs:
           sudo apt-get update
           sudo apt install -y libasound2-dev libxcb-shape0-dev libxcb-xfixes0-dev libgtk-3-dev libudev-dev
 
+      - name: Install WiX
+        run: |
+          dotnet tool install --global wix
+          wix extension add -g WixToolset.UI.wixext
+          wix extension add -g WixToolset.Util.wixext
+        if: runner.os == 'Windows'
+
       - name: Cargo build
         run: cargo build --locked --package ruffle_desktop --release ${{matrix.DESKTOP_FEATURES && '--features' }} ${{matrix.DESKTOP_FEATURES}} ${{ matrix.target && '--target' }} ${{ matrix.target }}
         env:
@@ -129,6 +138,15 @@ jobs:
           cp README.md package/README.md
           cp LICENSE.md package/LICENSE.md
 
+      - name: Package MSI
+        run: |
+          cd desktop/packages/windows/wix
+          wix build ruffle.wxs -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -arch ${{ matrix.MSI_ARCH }} -o ../../../../package/setup.msi -pdbtype none
+        env:
+          RUFFLE_VERSION: "0.1.0"
+          CARGO_BUILD_DIR: ../../../../target/${{ matrix.target }}/release
+        if: runner.os == 'Windows'
+
       - name: Package Windows
         if: runner.os == 'Windows'
         run: |
@@ -139,6 +157,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cp ${{ env.CARGO_BUILD_DIR }}/ruffle_desktop package/ruffle
+
+          # Package extras
+          mkdir -p package/extras
+          cp desktop/packages/linux/rs.ruffle.Ruffle.desktop package/extras
+          cp desktop/packages/linux/rs.ruffle.Ruffle.metainfo.xml package/extras
+          cp desktop/packages/linux/rs.ruffle.Ruffle.svg package/extras
+
           # We must enter the package/ directory in order to create a flat tarball (i.e. without a directory in it).
           cd package
           tar -czvf ../${{ env.PACKAGE_FILE }} *
@@ -291,6 +316,14 @@ jobs:
     needs: create-nightly-release
     if: needs.create-nightly-release.outputs.is_active == 'true'
     runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      attestations: write
+      checks: read
+      contents: write
+      id-token: write
+      pull-requests: read
+      statuses: write
     strategy:
       matrix:
         demo: [false, true]
@@ -311,9 +344,10 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       # wasm-bindgen-cli version must match wasm-bindgen crate version.
-      # Be sure to update in test_web.yml, web/Cargo.toml and web/README.md.
+      # Be sure to update in test_web.yml, Cargo.toml, web/docker/Dockerfile,
+      # and web/README.md as well.
       - name: Install wasm-bindgen
-        run: cargo install wasm-bindgen-cli --version 0.2.92
+        run: cargo install wasm-bindgen-cli --version 0.2.93
 
       # Keep the version number in sync in all workflows,
       # and in the extension builder Dockerfile!
@@ -321,7 +355,7 @@ jobs:
         uses: sigoden/install-binary@v1
         with:
           repo: WebAssembly/binaryen
-          tag: version_118
+          tag: version_119
           name: wasm-opt
 
       - name: Install node packages
@@ -374,7 +408,7 @@ jobs:
       - name: Publish npm package
         if: ${{ !matrix.demo }}
         # npm scoped packages are private by default, explicitly make public
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         continue-on-error: true
         working-directory: web/packages/selfhosted/dist
         env:
@@ -552,15 +586,15 @@ jobs:
 
       - name: Update PKGBUILD
         run: >
-          sed -i ./PKGBUILD
+          sed -i desktop/packages/linux/aur/ruffle-nightly-bin/PKGBUILD
           -e "s/@VERSION@/${{ steps.current_time_dots.outputs.formattedTime }}/"
           -e "s/@SHA512SUM@/$(sha512sum ${{ needs.create-nightly-release.outputs.package_prefix }}-linux-x86_64.tar.gz | cut -d' ' -f1)/"
 
       - name: Publish AUR package
-        uses: KSXGitHub/github-actions-deploy-aur@v2.7.2
+        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
         with:
           pkgname: ruffle-nightly-bin
-          pkgbuild: ./PKGBUILD
+          pkgbuild: desktop/packages/linux/aur/ruffle-nightly-bin/PKGBUILD
           commit_username: RuffleBuild
           commit_email: ruffle@ruffle.rs
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}

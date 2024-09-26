@@ -117,7 +117,7 @@ impl DisplayObjectWindow {
     pub fn show<'gc>(
         &mut self,
         egui_ctx: &egui::Context,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         object: DisplayObject<'gc>,
         messages: &mut Vec<Message>,
     ) -> bool {
@@ -186,7 +186,7 @@ impl DisplayObjectWindow {
     pub fn show_interactive<'gc>(
         &mut self,
         ui: &mut Ui,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         object: InteractiveObject<'gc>,
     ) {
         Grid::new(ui.id().with("interactive"))
@@ -250,7 +250,7 @@ impl DisplayObjectWindow {
                 ui.label("Focus Rect");
                 let focus_rect = object.focus_rect();
                 let mut new_focus_rect = focus_rect;
-                ComboBox::from_id_source(ui.id().with("focus_rect"))
+                ComboBox::from_id_salt(ui.id().with("focus_rect"))
                     .selected_text(optional_boolean_switch_value(focus_rect))
                     .show_ui(ui, |ui| {
                         for value in [None, Some(true), Some(false)] {
@@ -296,7 +296,7 @@ impl DisplayObjectWindow {
     pub fn show_edit_text<'gc>(
         &mut self,
         ui: &mut Ui,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         object: EditText<'gc>,
     ) {
         Grid::new(ui.id().with("edittext"))
@@ -395,7 +395,7 @@ impl DisplayObjectWindow {
                 ui.label("Autosize");
                 ui.horizontal(|ui| {
                     let mut autosize = object.autosize();
-                    ComboBox::from_id_source(ui.id().with("autosize"))
+                    ComboBox::from_id_salt(ui.id().with("autosize"))
                         .selected_text(format!("{:?}", autosize))
                         .show_ui(ui, |ui| {
                             for value in [
@@ -476,7 +476,7 @@ impl DisplayObjectWindow {
             });
 
         CollapsingHeader::new("Span List")
-            .id_source(ui.id().with("spans"))
+            .id_salt(ui.id().with("spans"))
             .show(ui, |ui| {
                 Grid::new(ui.id().with("spans"))
                     .num_columns(7)
@@ -519,7 +519,7 @@ impl DisplayObjectWindow {
     pub fn show_bitmap<'gc>(
         &mut self,
         ui: &mut Ui,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         object: Bitmap<'gc>,
     ) {
         let bitmap_data = object.bitmap_data(context.renderer);
@@ -542,7 +542,7 @@ impl DisplayObjectWindow {
     pub fn show_movieclip<'gc>(
         &mut self,
         ui: &mut Ui,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         object: MovieClip<'gc>,
     ) {
         Grid::new(ui.id().with("movieclip"))
@@ -598,7 +598,7 @@ impl DisplayObjectWindow {
             });
 
         CollapsingHeader::new("Frame List")
-            .id_source(ui.id().with("frames"))
+            .id_salt(ui.id().with("frames"))
             .show(ui, |ui| {
                 Grid::new(ui.id().with("frames"))
                     .num_columns(5)
@@ -655,7 +655,7 @@ impl DisplayObjectWindow {
     pub fn show_stage<'gc>(
         &mut self,
         ui: &mut Ui,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         object: Stage<'gc>,
         messages: &mut Vec<Message>,
     ) {
@@ -715,7 +715,7 @@ impl DisplayObjectWindow {
             "automatic"
         };
         CollapsingHeader::new(format!("Tab Order ({})", tab_order_suffix))
-            .id_source(ui.id().with("tab_order"))
+            .id_salt(ui.id().with("tab_order"))
             .show(ui, |ui| {
                 Grid::new(ui.id().with("tab_order_grid"))
                     .num_columns(3)
@@ -756,7 +756,7 @@ impl DisplayObjectWindow {
     pub fn show_display<'gc>(
         &mut self,
         ui: &mut Ui,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         object: DisplayObject<'gc>,
         messages: &mut Vec<Message>,
     ) {
@@ -877,7 +877,7 @@ impl DisplayObjectWindow {
                 ui.label("Blend mode");
                 let old_blend = object.blend_mode();
                 let mut new_blend = old_blend;
-                ComboBox::from_id_source(ui.id().with("blendmode"))
+                ComboBox::from_id_salt(ui.id().with("blendmode"))
                     .selected_text(blend_mode_name(old_blend))
                     .show_ui(ui, |ui| {
                         for mode in ALL_BLEND_MODES {
@@ -921,7 +921,7 @@ impl DisplayObjectWindow {
         let filters = object.filters();
         if !filters.is_empty() {
             CollapsingHeader::new(format!("Filters ({})", filters.len()))
-                .id_source(ui.id().with("filters"))
+                .id_salt(ui.id().with("filters"))
                 .show(ui, |ui| {
                     for filter in filters {
                         ui.label(format!("{:?}", filter));
@@ -933,7 +933,7 @@ impl DisplayObjectWindow {
     pub fn show_position<'gc>(
         &mut self,
         ui: &mut Ui,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         object: DisplayObject<'gc>,
         messages: &mut Vec<Message>,
     ) {
@@ -1042,7 +1042,7 @@ impl DisplayObjectWindow {
     pub fn show_children<'gc>(
         &mut self,
         ui: &mut Ui,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         object: DisplayObject<'gc>,
         messages: &mut Vec<Message>,
     ) {
@@ -1062,7 +1062,7 @@ impl DisplayObjectWindow {
     pub fn show_display_tree<'gc>(
         &mut self,
         ui: &mut Ui,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         object: DisplayObject<'gc>,
         messages: &mut Vec<Message>,
         search: &WStr,
@@ -1262,7 +1262,7 @@ fn bounds_label(ui: &mut Ui, bounds: Rectangle<Twips>, hover: &mut Option<Rectan
 
 pub fn open_display_object_button<'gc>(
     ui: &mut Ui,
-    context: &mut UpdateContext<'_, 'gc>,
+    context: &mut UpdateContext<'gc>,
     messages: &mut Vec<Message>,
     object: DisplayObject<'gc>,
     hover: &mut Option<DisplayObjectHandle>,

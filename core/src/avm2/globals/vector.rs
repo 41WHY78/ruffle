@@ -72,16 +72,18 @@ fn class_call<'gc>(
         )?));
     }
 
-    let this_class = activation.subclass_object().unwrap();
+    let this_class = activation
+        .bound_class()
+        .expect("Method call without bound class?");
+
     let value_type = this_class
-        .inner_class_definition()
         .param()
-        .ok_or("Cannot convert to unparametrized Vector")?; // technically unreachable
+        .expect("Cannot convert to unparametrized Vector"); // technically unreachable
 
     let arg = args.get(0).cloned().unwrap();
     let arg = arg.as_object().ok_or("Cannot convert to Vector")?;
 
-    if arg.instance_class() == this_class.inner_class_definition() {
+    if arg.instance_class() == this_class {
         return Ok(arg.into());
     }
 
@@ -247,18 +249,22 @@ pub fn concat<'gc>(
         return Err("Not a vector-structured object".into());
     };
 
+    let original_length = new_vector_storage.length();
+
+    let use_swf10_behavior = activation
+        .caller_movie()
+        .map_or(false, |m| m.version() < 11);
+
     let val_class = new_vector_storage.value_type_for_coercion(activation);
 
     for arg in args {
-        let arg_obj = arg
-            .as_object()
-            .ok_or("Cannot concat Vector with null or undefined")?;
+        let arg_obj = arg.coerce_to_object_or_typeerror(activation, None)?;
 
         // this is Vector.<int/uint/Number/*>
         let my_base_vector_class = activation
-            .subclass_object()
-            .expect("Method call without bound class?")
-            .inner_class_definition();
+            .bound_class()
+            .expect("Method call without bound class?");
+
         if !arg.is_of_type(activation, my_base_vector_class) {
             let base_vector_name = my_base_vector_class
                 .name()
@@ -282,21 +288,17 @@ pub fn concat<'gc>(
             continue;
         };
 
-        for val in old_vec {
-            if let Ok(val_obj) = val.coerce_to_object(activation) {
-                if !val.is_of_type(activation, val_class) {
-                    let other_val_class = val_obj.instance_class();
-                    return Err(format!(
-                        "TypeError: Cannot coerce Vector value of type {:?} to type {:?}",
-                        other_val_class.name(),
-                        val_class.name()
-                    )
-                    .into());
-                }
-            }
-
+        for (i, val) in old_vec.iter().enumerate() {
+            let insertion_index = (original_length + i) as i32;
             let coerced_val = val.coerce_to_type(activation, val_class)?;
-            new_vector_storage.push(coerced_val, activation)?;
+
+            if use_swf10_behavior {
+                // See bugzilla 504525: In SWFv10, calling `concat` with multiple
+                // arguments passed results in concatenating in the wrong order.
+                new_vector_storage.insert(insertion_index, coerced_val, activation)?;
+            } else {
+                new_vector_storage.push(coerced_val, activation)?;
+            }
         }
     }
 
@@ -762,6 +764,8 @@ pub fn slice<'gc>(
 }
 
 /// Implements `Vector.sort`
+///
+/// TODO: Consider sharing this code with `globals::array::sort`?
 pub fn sort<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
@@ -811,21 +815,18 @@ pub fn sort<'gc>(
         drop(vs);
 
         let mut unique_sort_satisfied = true;
-        let mut error_signal = Ok(());
-        values.sort_unstable_by(|a, b| match compare(activation, *a, *b) {
-            Ok(Ordering::Equal) => {
-                unique_sort_satisfied = false;
-                Ordering::Equal
-            }
-            Ok(v) if options.contains(SortOptions::DESCENDING) => v.reverse(),
-            Ok(v) => v,
-            Err(e) => {
-                error_signal = Err(e);
-                Ordering::Less
-            }
-        });
-
-        error_signal?;
+        super::array::qsort(&mut values, &mut |a, b| {
+            compare(activation, *a, *b).map(|cmp| {
+                if cmp == Ordering::Equal {
+                    unique_sort_satisfied = false;
+                    Ordering::Equal
+                } else if options.contains(SortOptions::DESCENDING) {
+                    cmp.reverse()
+                } else {
+                    cmp
+                }
+            })
+        })?;
 
         //NOTE: RETURNINDEXEDARRAY does NOT actually return anything useful.
         //The actual sorting still happens, but the results are discarded.
@@ -898,11 +899,11 @@ pub fn splice<'gc>(
 pub fn create_generic_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
     let mc = activation.context.gc_context;
     let class = Class::new(
-        QName::new(activation.avm2().vector_public_namespace, "Vector"),
-        Some(activation.avm2().classes().object.inner_class_definition()),
+        QName::new(activation.avm2().namespaces.vector_public, "Vector"),
+        Some(activation.avm2().class_defs().object),
         Method::from_builtin(generic_init, "<Vector instance initializer>", mc),
         Method::from_builtin(generic_init, "<Vector class initializer>", mc),
-        activation.avm2().classes().class.inner_class_definition(),
+        activation.avm2().class_defs().class,
         mc,
     );
 
@@ -911,14 +912,14 @@ pub fn create_generic_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<
 
     class.mark_traits_loaded(activation.context.gc_context);
     class
-        .init_vtable(&mut activation.context)
+        .init_vtable(activation.context)
         .expect("Native class's vtable should initialize");
 
     let c_class = class.c_class().expect("Class::new returns an i_class");
 
     c_class.mark_traits_loaded(activation.context.gc_context);
     c_class
-        .init_vtable(&mut activation.context)
+        .init_vtable(activation.context)
         .expect("Native class's vtable should initialize");
 
     class
@@ -929,26 +930,24 @@ pub fn create_builtin_class<'gc>(
     activation: &mut Activation<'_, 'gc>,
     param: Option<Class<'gc>>,
 ) -> Class<'gc> {
-    let mc = activation.context.gc_context;
+    let mc = activation.gc();
+    let namespaces = activation.avm2().namespaces;
 
     // FIXME - we should store a `Multiname` instead of a `QName`, and use the
     // `params` field. For now, this is good enough to get tests passing
     let name = if let Some(param) = param {
         let name = format!("Vector.<{}>", param.name().to_qualified_name(mc));
-        QName::new(
-            activation.avm2().vector_public_namespace,
-            AvmString::new_utf8(mc, name),
-        )
+        QName::new(namespaces.vector_public, AvmString::new_utf8(mc, name))
     } else {
-        QName::new(activation.avm2().vector_public_namespace, "Vector.<*>")
+        QName::new(namespaces.vector_public, "Vector.<*>")
     };
 
     let class = Class::new(
         name,
-        Some(activation.avm2().classes().object.inner_class_definition()),
+        Some(activation.avm2().class_defs().object),
         Method::from_builtin(instance_init, "<Vector.<T> instance initializer>", mc),
         Method::from_builtin(class_init, "<Vector.<T> class initializer>", mc),
-        activation.avm2().classes().class.inner_class_definition(),
+        activation.avm2().class_defs().class,
         mc,
     );
 
@@ -974,7 +973,7 @@ pub fn create_builtin_class<'gc>(
     ];
     class.define_builtin_instance_properties(
         mc,
-        activation.avm2().public_namespace_base_version,
+        namespaces.public_all(),
         PUBLIC_INSTANCE_PROPERTIES,
     );
 
@@ -1001,22 +1000,18 @@ pub fn create_builtin_class<'gc>(
         ("sort", sort),
         ("splice", splice),
     ];
-    class.define_builtin_instance_methods(
-        mc,
-        activation.avm2().as3_namespace,
-        AS3_INSTANCE_METHODS,
-    );
+    class.define_builtin_instance_methods(mc, namespaces.as3, AS3_INSTANCE_METHODS);
 
     class.mark_traits_loaded(activation.context.gc_context);
     class
-        .init_vtable(&mut activation.context)
+        .init_vtable(activation.context)
         .expect("Native class's vtable should initialize");
 
     let c_class = class.c_class().expect("Class::new returns an i_class");
 
     c_class.mark_traits_loaded(activation.context.gc_context);
     c_class
-        .init_vtable(&mut activation.context)
+        .init_vtable(activation.context)
         .expect("Native class's vtable should initialize");
 
     class

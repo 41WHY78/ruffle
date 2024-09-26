@@ -1,6 +1,6 @@
 use crate::custom_event::RuffleEvent;
-use crate::gui::text;
 use crate::gui::widgets::PathOrUrlField;
+use crate::gui::{text, FilePicker, LocalizableText};
 use crate::player::LaunchOptions;
 use egui::{
     emath, Align2, Button, Checkbox, ComboBox, Grid, Layout, Slider, TextEdit, Ui, Widget, Window,
@@ -49,6 +49,7 @@ impl OpenDialog {
     pub fn new(
         defaults: LaunchOptions,
         default_url: Option<Url>,
+        picker: FilePicker,
         event_loop: EventLoopProxy<RuffleEvent>,
     ) -> Self {
         let spoof_url = OptionalField::new(
@@ -71,7 +72,7 @@ impl OpenDialog {
             defaults.proxy.as_ref().map(Url::to_string),
             UrlField::new("socks5://localhost:8080"),
         );
-        let path = PathOrUrlField::new(default_url, "path/to/movie.swf");
+        let path = PathOrUrlField::new(default_url, "path/to/movie.swf", picker);
         let script_timeout = OptionalField::new(
             defaults
                 .player
@@ -157,7 +158,7 @@ impl OpenDialog {
                         }
                     }),
                 ),
-                Box::new(|locale| text(locale, "align-force")),
+                LocalizableText::LocalizedText("align-force"),
                 false,
             ),
         );
@@ -170,21 +171,28 @@ impl OpenDialog {
                 EnumDropdownField::new(
                     StageScaleMode::default(),
                     vec![
-                        StageScaleMode::ExactFit,
-                        StageScaleMode::NoBorder,
                         StageScaleMode::NoScale,
                         StageScaleMode::ShowAll,
+                        StageScaleMode::ExactFit,
+                        StageScaleMode::NoBorder,
                     ],
                     Box::new(|value, locale| match value {
-                        StageScaleMode::ExactFit => text(locale, "scale-mode-exactfit"),
-                        StageScaleMode::NoBorder => text(locale, "scale-mode-noborder"),
                         StageScaleMode::NoScale => text(locale, "scale-mode-noscale"),
                         StageScaleMode::ShowAll => text(locale, "scale-mode-showall"),
+                        StageScaleMode::ExactFit => text(locale, "scale-mode-exactfit"),
+                        StageScaleMode::NoBorder => text(locale, "scale-mode-noborder"),
                     }),
-                ),
-                Box::new(|locale| text(locale, "scale-mode-force")),
+                )
+                .with_tooltips(Box::new(|value, locale| match value {
+                    StageScaleMode::NoScale => Some(text(locale, "scale-mode-noscale-tooltip")),
+                    StageScaleMode::ShowAll => Some(text(locale, "scale-mode-showall-tooltip")),
+                    StageScaleMode::ExactFit => Some(text(locale, "scale-mode-exactfit-tooltip")),
+                    StageScaleMode::NoBorder => Some(text(locale, "scale-mode-noborder-tooltip")),
+                })),
+                LocalizableText::LocalizedText("scale-mode-force"),
                 false,
-            ),
+            )
+            .with_checkbox_tooltip(LocalizableText::LocalizedText("scale-mode-force-tooltip")),
         );
         let load_behavior = OptionalField::new(
             defaults.player.load_behavior,
@@ -279,10 +287,10 @@ impl OpenDialog {
         } else {
             self.options.player.frame_rate = None;
         }
-        if let Some(url) = self.path.value() {
+        if let Some(url) = self.path.result() {
             if self
                 .event_loop
-                .send_event(RuffleEvent::OpenURL(
+                .send_event(RuffleEvent::Open(
                     url.clone(),
                     Box::new(self.options.clone()),
                 ))
@@ -312,7 +320,7 @@ impl OpenDialog {
                         .striped(true)
                         .show(ui, |ui| {
                             ui.label(text(locale, "open-dialog-path"));
-                            is_valid &= self.path.ui(locale, ui).value().is_some();
+                            is_valid &= self.path.ui(locale, ui).result().is_some();
                             ui.end_row();
                         });
                 });
@@ -399,7 +407,7 @@ impl OpenDialog {
 
                 // TODO: This should probably be a global setting somewhere, not per load
                 ui.label(text(locale, "open-url-mode"));
-                ComboBox::from_id_source("open-file-advanced-options-open-url-mode")
+                ComboBox::from_id_salt("open-file-advanced-options-open-url-mode")
                     .selected_text(match self.options.open_url_mode {
                         OpenURLMode::Allow => text(locale, "open-url-mode-allow"),
                         OpenURLMode::Confirm => text(locale, "open-url-mode-confirm"),
@@ -517,7 +525,7 @@ impl OpenDialog {
                         ui.add_sized(
                             ui.available_size(),
                             Slider::new(&mut self.framerate, 0.0..=100.0)
-                                .clamp_to_range(false)
+                                .clamping(egui::SliderClamping::Never)
                                 .suffix(text(locale, "custom-framerate-suffix")),
                         );
                     });
@@ -561,7 +569,7 @@ impl OpenDialog {
                     ui.horizontal(|ui| {
                         ui.text_edit_singleline(value);
                         if ui
-                            .button("x")
+                            .button("🗑")
                             .on_hover_text(text(locale, "open-dialog-remove-parameter"))
                             .clicked()
                         {
@@ -720,12 +728,13 @@ impl<T: emath::Numeric> InnerField for NumberField<T> {
 }
 
 type ValueToTextFn<T> = dyn Fn(T, &LanguageIdentifier) -> Cow<'static, str>;
-type CheckboxLabelFn = dyn Fn(&LanguageIdentifier) -> Cow<'static, str>;
+type ValueToOptTextFn<T> = dyn Fn(T, &LanguageIdentifier) -> Option<Cow<'static, str>>;
 
 struct EnumDropdownField<T: Copy> {
     id: egui::Id,
     default: T,
     value_to_name: Box<ValueToTextFn<T>>,
+    value_to_tooltip: Box<ValueToOptTextFn<T>>,
     possible_values: Vec<T>,
 }
 
@@ -736,7 +745,13 @@ impl<T: Copy> EnumDropdownField<T> {
             default,
             value_to_name,
             possible_values,
+            value_to_tooltip: Box::new(|_, _| None),
         }
+    }
+
+    pub fn with_tooltips(mut self, value_to_tooltip: Box<ValueToOptTextFn<T>>) -> Self {
+        self.value_to_tooltip = value_to_tooltip;
+        self
     }
 }
 
@@ -749,15 +764,19 @@ impl<T: Copy + PartialEq> InnerField for EnumDropdownField<T> {
     }
 
     fn ui(&self, ui: &mut Ui, value: &mut Self::Value, _error: bool, locale: &LanguageIdentifier) {
-        ComboBox::from_id_source(self.id)
+        ComboBox::from_id_salt(self.id)
             .selected_text((self.value_to_name)(*value, locale))
             .show_ui(ui, |ui| {
                 for possible_value in &self.possible_values {
-                    ui.selectable_value(
+                    let response = ui.selectable_value(
                         value,
                         *possible_value,
                         (self.value_to_name)(*possible_value, locale),
                     );
+
+                    if let Some(tooltip) = (self.value_to_tooltip)(*possible_value, locale) {
+                        response.on_hover_text_at_pointer(tooltip);
+                    }
                 }
             });
     }
@@ -792,7 +811,7 @@ impl InnerField for BooleanDropdownField {
     }
 
     fn ui(&self, ui: &mut Ui, value: &mut Self::Value, _error: bool, locale: &LanguageIdentifier) {
-        ComboBox::from_id_source(self.id)
+        ComboBox::from_id_salt(self.id)
             .selected_text((self.value_to_name)(*value, locale))
             .show_ui(ui, |ui| {
                 ui.selectable_value(value, false, (self.value_to_name)(false, locale));
@@ -807,17 +826,24 @@ impl InnerField for BooleanDropdownField {
 
 struct FieldWithCheckbox<T: InnerField> {
     field: T,
-    checkbox_label: Box<CheckboxLabelFn>,
+    checkbox_label: LocalizableText,
     checkbox_default: bool,
+    tooltip_label: Option<LocalizableText>,
 }
 
 impl<T: InnerField> FieldWithCheckbox<T> {
-    pub fn new(field: T, checkbox_label: Box<CheckboxLabelFn>, checkbox_default: bool) -> Self {
+    pub fn new(field: T, checkbox_label: LocalizableText, checkbox_default: bool) -> Self {
         Self {
             field,
             checkbox_label,
             checkbox_default,
+            tooltip_label: None,
         }
+    }
+
+    pub fn with_checkbox_tooltip(mut self, tooltip_label: LocalizableText) -> Self {
+        self.tooltip_label = Some(tooltip_label);
+        self
     }
 }
 
@@ -831,7 +857,10 @@ impl<T: InnerField> InnerField for FieldWithCheckbox<T> {
 
     fn ui(&self, ui: &mut Ui, value: &mut Self::Value, error: bool, locale: &LanguageIdentifier) {
         self.field.ui(ui, &mut value.0, error, locale);
-        ui.checkbox(&mut value.1, (self.checkbox_label)(locale));
+        let response = ui.checkbox(&mut value.1, self.checkbox_label.localize(locale));
+        if let Some(ref tooltip_label) = self.tooltip_label {
+            response.on_hover_text_at_pointer(tooltip_label.localize(locale));
+        }
     }
 
     fn value_to_result(&self, value: &Self::Value) -> Result<Self::Result, ()> {

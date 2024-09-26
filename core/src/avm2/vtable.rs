@@ -8,6 +8,7 @@ use crate::avm2::scope::ScopeChain;
 use crate::avm2::traits::{Trait, TraitKind};
 use crate::avm2::value::Value;
 use crate::avm2::{Class, Error, Multiname, Namespace, QName};
+use crate::context::GcContext;
 use crate::string::AvmString;
 use gc_arena::{Collect, GcCell, Mutation};
 use std::cell::Ref;
@@ -55,7 +56,7 @@ impl PartialEq for VTable<'_> {
 #[collect(no_drop)]
 pub struct ClassBoundMethod<'gc> {
     pub class: Class<'gc>,
-    pub class_obj: Option<ClassObject<'gc>>,
+    pub super_class_obj: Option<ClassObject<'gc>>,
     pub scope: Option<ScopeChain<'gc>>,
     pub method: Method<'gc>,
 }
@@ -114,15 +115,15 @@ impl<'gc> VTable<'gc> {
 
     pub fn slot_class_name(
         &self,
+        context: &mut GcContext<'_, 'gc>,
         slot_id: u32,
-        mc: &Mutation<'gc>,
-    ) -> Result<Multiname<'gc>, Error<'gc>> {
+    ) -> Result<AvmString<'gc>, Error<'gc>> {
         self.0
             .read()
             .slot_classes
             .get(slot_id as usize)
             .ok_or_else(|| "Invalid slot ID".into())
-            .map(|c| c.get_name(mc))
+            .map(|c| c.get_name(context))
     }
 
     pub fn get_trait(self, name: &Multiname<'gc>) -> Option<Property> {
@@ -211,8 +212,7 @@ impl<'gc> VTable<'gc> {
     pub fn init_vtable(
         self,
         defining_class_def: Class<'gc>,
-        defining_class: Option<ClassObject<'gc>>,
-        traits: &[Trait<'gc>],
+        super_class_obj: Option<ClassObject<'gc>>,
         scope: Option<ScopeChain<'gc>>,
         superclass_vtable: Option<Self>,
         mc: &Mutation<'gc>,
@@ -316,12 +316,12 @@ impl<'gc> VTable<'gc> {
             &mut write.slot_classes,
         );
 
-        for trait_data in traits {
+        for trait_data in &*defining_class_def.traits() {
             match trait_data.kind() {
                 TraitKind::Method { method, .. } => {
                     let entry = ClassBoundMethod {
                         class: defining_class_def,
-                        class_obj: defining_class,
+                        super_class_obj,
                         scope,
                         method: *method,
                     };
@@ -350,7 +350,7 @@ impl<'gc> VTable<'gc> {
                 TraitKind::Getter { method, .. } => {
                     let entry = ClassBoundMethod {
                         class: defining_class_def,
-                        class_obj: defining_class,
+                        super_class_obj,
                         scope,
                         method: *method,
                     };
@@ -388,7 +388,7 @@ impl<'gc> VTable<'gc> {
                 TraitKind::Setter { method, .. } => {
                     let entry = ClassBoundMethod {
                         class: defining_class_def,
-                        class_obj: defining_class,
+                        super_class_obj,
                         scope,
                         method: *method,
                     };
@@ -461,13 +461,13 @@ impl<'gc> VTable<'gc> {
                             type_name, unit, ..
                         } => (
                             Property::new_slot(new_slot_id),
-                            PropertyClass::name(mc, type_name.clone(), *unit),
+                            PropertyClass::name(*type_name, *unit),
                         ),
                         TraitKind::Const {
                             type_name, unit, ..
                         } => (
                             Property::new_const_slot(new_slot_id),
-                            PropertyClass::name(mc, type_name.clone(), *unit),
+                            PropertyClass::name(*type_name, *unit),
                         ),
                         TraitKind::Class { class, .. } => (
                             Property::new_const_slot(new_slot_id),
@@ -518,10 +518,10 @@ impl<'gc> VTable<'gc> {
         method: ClassBoundMethod<'gc>,
     ) -> FunctionObject<'gc> {
         let ClassBoundMethod {
-            class_obj,
+            class,
+            super_class_obj,
             scope,
             method,
-            ..
         } = method;
 
         FunctionObject::from_method(
@@ -529,30 +529,9 @@ impl<'gc> VTable<'gc> {
             method,
             scope.expect("Scope should exist here"),
             Some(receiver),
-            class_obj,
+            super_class_obj,
+            Some(class),
         )
-    }
-
-    /// Install a const trait on the global object.
-    /// This should only ever be called via `Object::install_const_late`,
-    /// on the `global` object.
-    pub fn install_const_trait_late(
-        self,
-        mc: &Mutation<'gc>,
-        name: QName<'gc>,
-        value: Value<'gc>,
-        class: Class<'gc>,
-    ) -> u32 {
-        let mut write = self.0.write(mc);
-
-        write.default_slots.push(Some(value));
-        let new_slot_id = write.default_slots.len() as u32 - 1;
-        write
-            .resolved_traits
-            .insert(name, Property::new_const_slot(new_slot_id));
-        write.slot_classes.push(PropertyClass::Class(class));
-
-        new_slot_id
     }
 
     /// Install an existing trait under a new name, provided by interface.

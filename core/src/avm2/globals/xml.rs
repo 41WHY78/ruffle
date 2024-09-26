@@ -339,9 +339,90 @@ pub fn set_namespace<'gc>(
 pub fn remove_namespace<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
-    _args: &[Value<'gc>],
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_method!(activation, "XML", "removeNamespace");
+    let xml = this.as_xml_object().unwrap();
+    let node = xml.node();
+
+    // 1. If x.[[Class]] ∈ {"text", "comment", "processing-instruction", "attribute"}, return x
+    if !node.is_element() {
+        return Ok(this.into());
+    }
+
+    // 2. Let ns be a Namespace object created as if by calling the function Namespace( namespace )
+    let value = args.get_value(0);
+    let ns = activation
+        .avm2()
+        .classes()
+        .namespace
+        .construct(activation, &[value])?
+        .as_namespace_object()
+        .unwrap();
+    let ns = E4XNamespace {
+        prefix: ns.prefix(),
+        uri: ns.namespace().as_uri(),
+    };
+
+    // 3. Let thisNS be the result of calling [[GetNamespace]] on x.[[Name]] with argument x.[[InScopeNamespaces]]
+    let in_scope_ns = node.in_scope_namespaces();
+    let this_ns = node.get_namespace(&in_scope_ns);
+
+    // 4. If (thisNS == ns), return x
+    if this_ns == ns {
+        return Ok(this.into());
+    }
+
+    {
+        let E4XNodeKind::Element { attributes, .. } = &*node.kind() else {
+            unreachable!()
+        };
+
+        // 5. For each a in x.[[Attributes]]
+        for attr in attributes {
+            // 5.a. Let aNS be the result of calling [[GetNamespace]] on a.[[Name]] with argument x.[[InScopeNamespaces]]
+            let attr_ns = attr.get_namespace(&in_scope_ns);
+            // 5.b. If (aNS == ns), return x
+            if attr_ns == ns {
+                return Ok(this.into());
+            }
+        }
+    }
+
+    // 6. If ns.prefix == undefined
+    if ns.prefix.is_none() {
+        let E4XNodeKind::Element {
+            ref mut namespaces, ..
+        } = &mut *node.kind_mut(activation.gc())
+        else {
+            unreachable!()
+        };
+        // 6.a. If there exists a namespace n ∈ x.[[InScopeNamespaces]],
+        // such that n.uri == ns.uri, remove the namespace n from x.[[InScopeNamespaces]]
+        namespaces.retain(|namespace| namespace.uri != ns.uri);
+    } else {
+        // 7. Else
+        let E4XNodeKind::Element {
+            ref mut namespaces, ..
+        } = &mut *node.kind_mut(activation.gc())
+        else {
+            unreachable!()
+        };
+        // 7.a. If there exists a namespace n ∈ x.[[InScopeNamespaces]],
+        // such that n.uri == ns.uri and n.prefix == ns.prefix, remove the namespace n from x.[[InScopeNamespaces]]
+        namespaces.retain(|namespace| *namespace != ns);
+    }
+
+    let E4XNodeKind::Element { children, .. } = &*node.kind() else {
+        unreachable!()
+    };
+    // 8. For each property p of x
+    for child in children {
+        // 8.a. If p.[[Class]] = "element", call the removeNamespace method of p with argument ns
+        if child.is_element() {
+            let xml = E4XOrXml::E4X(*child).get_or_create_xml(activation);
+            remove_namespace(activation, xml.into(), args)?;
+        }
+    }
 
     // 9. Return x
     Ok(this.into())
@@ -495,7 +576,7 @@ pub fn children<'gc>(
         activation,
         children,
         Some(xml.into()),
-        Some(Multiname::any(activation.gc())),
+        Some(Multiname::any()),
     )
     .into())
 }
@@ -565,7 +646,7 @@ pub fn attributes<'gc>(
         activation,
         attributes,
         Some(xml.into()),
-        Some(Multiname::any_attribute(activation.gc())),
+        Some(Multiname::any_attribute()),
     )
     .into())
 }
@@ -647,12 +728,14 @@ pub fn append_child<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let namespaces = activation.avm2().namespaces;
+
     let xml = this.as_xml_object().unwrap();
     let child = args.get_value(0);
     let child = crate::avm2::e4x::maybe_escape_child(activation, child)?;
 
     // 1. Let children be the result of calling the [[Get]] method of x with argument "*"
-    let name = Multiname::any(activation.gc());
+    let name = Multiname::any();
     let children = xml.get_property_local(&name, activation)?;
 
     // 2. Call the [[Put]] method of children with arguments children.[[Length]] and child
@@ -662,7 +745,7 @@ pub fn append_child<'gc>(
         .expect("Should have an XMLList");
     let length = xml_list.length();
     let name = Multiname::new(
-        activation.avm2().public_namespace_base_version,
+        namespaces.public_all(),
         AvmString::new_utf8(activation.context.gc_context, length.to_string()),
     );
     xml_list.set_property_local(&name, child, activation)?;
@@ -725,7 +808,7 @@ pub fn text<'gc>(
 
     if list.length() > 0 {
         // NOTE: Since avmplus uses appendNode to build the list here, we need to set target dirty flag.
-        list.set_dirty_flag(activation.gc());
+        list.set_dirty_flag();
     }
 
     // 3. Return list
@@ -782,7 +865,7 @@ pub fn comments<'gc>(
 
     if list.length() > 0 {
         // NOTE: Since avmplus uses appendNode to build the list here, we need to set target dirty flag.
-        list.set_dirty_flag(activation.gc());
+        list.set_dirty_flag();
     }
 
     // 3. Return list
@@ -815,7 +898,7 @@ pub fn processing_instructions<'gc>(
 
     if list.length() > 0 {
         // NOTE: Since avmplus uses appendNode to build the list here, we need to set target dirty flag.
-        list.set_dirty_flag(activation.gc());
+        list.set_dirty_flag();
     }
 
     // 5. Return list
@@ -841,11 +924,11 @@ pub fn insert_child_after<'gc>(
     // 3. Else if Type(child1) is XML
     if let Some(child1) = child1.as_object().and_then(|x| {
         if let Some(xml) = x.as_xml_object() {
-            return Some(*xml.node());
+            return Some(xml.node());
         // NOTE: Non-standard avmplus behavior, single element XMLLists are treated as XML objects.
         } else if let Some(list) = x.as_xml_list_object() {
             if list.length() == 1 {
-                return Some(*list.children()[0].node());
+                return Some(list.children()[0].node());
             }
         }
 
@@ -897,11 +980,11 @@ pub fn insert_child_before<'gc>(
     // 3. Else if Type(child1) is XML
     if let Some(child1) = child1.as_object().and_then(|x| {
         if let Some(xml) = x.as_xml_object() {
-            return Some(*xml.node());
+            return Some(xml.node());
         // NOTE: Non-standard avmplus behavior, single element XMLLists are treated as XML objects.
         } else if let Some(list) = x.as_xml_list_object() {
             if list.length() == 1 {
-                return Some(*list.children()[0].node());
+                return Some(list.children()[0].node());
             }
         }
 
@@ -1021,7 +1104,7 @@ pub fn set_children<'gc>(
     let value = args.get_value(0);
 
     // 1. Call the [[Put]] method of x with arguments "*" and value
-    xml.set_property_local(&Multiname::any(activation.gc()), value, activation)?;
+    xml.set_property_local(&Multiname::any(), value, activation)?;
 
     // 2. Return x
     Ok(xml.into())

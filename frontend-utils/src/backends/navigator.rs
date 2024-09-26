@@ -28,7 +28,7 @@ use tracing::warn;
 use url::{ParseError, Url};
 
 pub trait NavigatorInterface: Clone + Send + 'static {
-    fn confirm_website_navigation(&self, url: &Url) -> bool;
+    fn navigate_to_website(&self, url: Url, ask: bool);
 
     fn open_file(&self, path: &Path) -> io::Result<File>;
 
@@ -182,26 +182,13 @@ impl<F: FutureSpawner + 'static, I: NavigatorInterface> NavigatorBackend
             return;
         }
 
-        if self.open_url_mode == OpenURLMode::Confirm {
-            if !self.interface.confirm_website_navigation(&modified_url) {
-                tracing::info!("SWF tried to open a website, but the user declined the request");
-                return;
-            }
-        } else if self.open_url_mode == OpenURLMode::Deny {
+        if self.open_url_mode == OpenURLMode::Deny {
             tracing::warn!("SWF tried to open a website, but opening a website is not allowed");
             return;
         }
 
-        // If the user confirmed or if in Allow mode, open the website
-
-        // TODO: This opens local files in the browser while flash opens them
-        // in the default program for the respective filetype.
-        // This especially includes mailto links. Ruffle opens the browser which opens
-        // the preferred program while flash opens the preferred program directly.
-        match webbrowser::open(modified_url.as_ref()) {
-            Ok(_output) => {}
-            Err(e) => tracing::error!("Could not open URL {}: {}", modified_url.as_str(), e),
-        };
+        let ask = self.open_url_mode == OpenURLMode::Confirm;
+        self.interface.navigate_to_website(modified_url, ask);
     }
 
     fn fetch(&self, request: Request) -> OwnedFuture<Box<dyn SuccessResponse>, ErrorResponse> {
@@ -499,9 +486,7 @@ mod tests {
     use super::*;
 
     impl NavigatorInterface for () {
-        fn confirm_website_navigation(&self, _url: &Url) -> bool {
-            true
-        }
+        fn navigate_to_website(&self, _url: Url, _ask: bool) {}
 
         fn open_file(&self, path: &Path) -> io::Result<File> {
             File::open(path)
@@ -679,7 +664,17 @@ mod tests {
 
     #[macro_rules_attribute::apply(async_test)]
     async fn test_socket_fail() {
-        let addr = SocketAddr::from_str("[100::]:42").expect("black hole address");
+        // We want to use here an address that will cause the connection to fail instantly.
+        // On Windows and macOS we use an IPv6 black hole address,
+        // as connections to 127.0.0.42:226 do not fail instantly.
+        // On Linux we try to use a loopback address with an unused port,
+        // because some hosts try connecting to the black hole address.
+        let addr = if cfg!(target_os = "linux") {
+            SocketAddr::from_str("127.0.0.42:226")
+        } else {
+            SocketAddr::from_str("[100::]:42")
+        }
+        .expect("test address");
         let (_client_write, client_read) = connect_test_socket(addr, TIMEOUT, true);
 
         assert_next_socket_actions!(

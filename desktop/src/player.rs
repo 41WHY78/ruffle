@@ -1,9 +1,9 @@
 use crate::backends::{
-    CpalAudioBackend, DesktopExternalInterfaceProvider, DesktopFSCommandProvider, DesktopUiBackend,
-    RfdNavigatorInterface,
+    DesktopExternalInterfaceProvider, DesktopFSCommandProvider, DesktopNavigatorInterface,
+    DesktopUiBackend,
 };
 use crate::custom_event::RuffleEvent;
-use crate::gui::MovieView;
+use crate::gui::{FilePicker, MovieView};
 use crate::preferences::GlobalPreferences;
 use crate::{CALLSTACK, RENDER_INFO, SWF_INFO};
 use anyhow::anyhow;
@@ -11,6 +11,7 @@ use ruffle_core::backend::navigator::{OpenURLMode, SocketMode};
 use ruffle_core::config::Letterbox;
 use ruffle_core::events::{GamepadButton, KeyCode};
 use ruffle_core::{DefaultFont, LoadBehavior, Player, PlayerBuilder, PlayerEvent};
+use ruffle_frontend_utils::backends::audio::CpalAudioBackend;
 use ruffle_frontend_utils::backends::executor::{AsyncExecutor, PollRequester};
 use ruffle_frontend_utils::backends::navigator::ExternalNavigatorBackend;
 use ruffle_frontend_utils::bundle::source::BundleSourceError;
@@ -43,6 +44,7 @@ pub struct LaunchOptions {
     pub tcp_connections: Option<SocketMode>,
     pub fullscreen: bool,
     pub save_directory: PathBuf,
+    pub cache_directory: PathBuf,
     pub open_url_mode: OpenURLMode,
     pub gamepad_button_mapping: HashMap<GamepadButton, KeyCode>,
     pub avm2_optimizer_enabled: bool,
@@ -90,6 +92,7 @@ impl From<&GlobalPreferences> for LaunchOptions {
             proxy: value.cli.proxy.clone(),
             fullscreen: value.cli.fullscreen,
             save_directory: value.cli.save_directory.clone(),
+            cache_directory: value.cli.cache_directory.clone(),
             open_url_mode: value.cli.open_url_mode,
             socket_allowed: HashSet::from_iter(value.cli.socket_allow.iter().cloned()),
             tcp_connections: value.cli.tcp_connections,
@@ -123,15 +126,16 @@ impl ActivePlayer {
         opt: &LaunchOptions,
         event_loop: EventLoopProxy<RuffleEvent>,
         movie_url: &Url,
-        window: Rc<Window>,
+        window: Arc<Window>,
         descriptors: Arc<Descriptors>,
         movie_view: MovieView,
         font_database: Rc<fontdb::Database>,
         preferences: GlobalPreferences,
+        file_picker: FilePicker,
     ) -> Self {
         let mut builder = PlayerBuilder::new();
 
-        match CpalAudioBackend::new(&preferences) {
+        match CpalAudioBackend::new(preferences.output_device_name().as_deref()) {
             Ok(audio) => {
                 builder = builder.with_audio(audio);
             }
@@ -193,6 +197,7 @@ impl ActivePlayer {
                     tcp_connections: opt.tcp_connections,
                     fullscreen: opt.fullscreen,
                     save_directory: opt.save_directory.clone(),
+                    cache_directory: opt.cache_directory.clone(),
                     open_url_mode: opt.open_url_mode,
                     gamepad_button_mapping: opt.gamepad_button_mapping.clone(),
                     avm2_optimizer_enabled: opt.avm2_optimizer_enabled,
@@ -217,23 +222,26 @@ impl ActivePlayer {
             opt.socket_allowed.clone(),
             opt.tcp_connections.unwrap_or(SocketMode::Ask),
             Rc::new(content),
-            RfdNavigatorInterface,
+            DesktopNavigatorInterface::new(event_loop.clone()),
         );
 
         if cfg!(feature = "external_video") && preferences.openh264_enabled() {
             #[cfg(feature = "external_video")]
             {
-                use ruffle_video_external::backend::ExternalVideoBackend;
-                let path = tokio::task::block_in_place(ExternalVideoBackend::get_openh264);
-                let openh264_path = match path {
-                    Ok(path) => Some(path),
+                use ruffle_video_external::{
+                    backend::ExternalVideoBackend, decoder::openh264::OpenH264Codec,
+                };
+                let openh264 = tokio::task::block_in_place(|| {
+                    OpenH264Codec::load(&opt.cache_directory.join("video"))
+                });
+                let backend = match openh264 {
+                    Ok(codec) => ExternalVideoBackend::new_with_openh264(codec),
                     Err(e) => {
-                        tracing::error!("Couldn't get OpenH264: {}", e);
-                        None
+                        tracing::error!("Failed to load OpenH264: {}", e);
+                        ExternalVideoBackend::new()
                     }
                 };
-
-                builder = builder.with_video(ExternalVideoBackend::new(openh264_path));
+                builder = builder.with_video(backend);
             }
         } else {
             #[cfg(feature = "software_video")]
@@ -264,14 +272,15 @@ impl ActivePlayer {
             .with_storage(preferences.storage_backend().create_backend(&opt))
             .with_fs_commands(Box::new(DesktopFSCommandProvider {
                 event_loop: event_loop.clone(),
-                window: window.clone(),
             }))
             .with_ui(
                 DesktopUiBackend::new(
                     window.clone(),
+                    event_loop.clone(),
                     opt.open_url_mode,
                     font_database,
                     preferences,
+                    file_picker,
                 )
                 .expect("Couldn't create ui backend"),
             )
@@ -381,19 +390,21 @@ impl ActivePlayer {
 pub struct PlayerController {
     player: Option<ActivePlayer>,
     event_loop: EventLoopProxy<RuffleEvent>,
-    window: Rc<Window>,
+    window: Arc<Window>,
     descriptors: Arc<Descriptors>,
     font_database: Rc<fontdb::Database>,
     preferences: GlobalPreferences,
+    file_picker: FilePicker,
 }
 
 impl PlayerController {
     pub fn new(
         event_loop: EventLoopProxy<RuffleEvent>,
-        window: Rc<Window>,
+        window: Arc<Window>,
         descriptors: Arc<Descriptors>,
         font_database: fontdb::Database,
         preferences: GlobalPreferences,
+        file_picker: FilePicker,
     ) -> Self {
         Self {
             player: None,
@@ -402,6 +413,7 @@ impl PlayerController {
             descriptors,
             font_database: Rc::new(font_database),
             preferences,
+            file_picker,
         }
     }
 
@@ -415,6 +427,7 @@ impl PlayerController {
             movie_view,
             self.font_database.clone(),
             self.preferences.clone(),
+            self.file_picker.clone(),
         ));
     }
 

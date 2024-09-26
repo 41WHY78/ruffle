@@ -177,12 +177,17 @@ impl PlayerOptions {
         if self.with_video {
             #[cfg(feature = "ruffle_video_external")]
             {
-                use ruffle_video_external::backend::ExternalVideoBackend;
-                let openh264_path = ExternalVideoBackend::get_openh264()
-                    .map_err(|e| anyhow!("Couldn't get OpenH264: {}", e))?;
+                let current_exe = std::env::current_exe()?;
+                let directory = current_exe.parent().expect("Executable parent dir");
+
+                use ruffle_video_external::{
+                    backend::ExternalVideoBackend, decoder::openh264::OpenH264Codec,
+                };
+                let openh264 = OpenH264Codec::load(directory)
+                    .map_err(|e| anyhow!("Couldn't load OpenH264: {}", e))?;
 
                 player_builder =
-                    player_builder.with_video(ExternalVideoBackend::new(Some(openh264_path)));
+                    player_builder.with_video(ExternalVideoBackend::new_with_openh264(openh264));
             }
 
             #[cfg(all(
@@ -388,7 +393,6 @@ impl ImageComparison {
 pub struct RenderOptions {
     optional: bool,
     pub sample_count: u32,
-    pub exclude_warp: bool,
 }
 
 impl Default for RenderOptions {
@@ -396,7 +400,6 @@ impl Default for RenderOptions {
         Self {
             optional: false,
             sample_count: 1,
-            exclude_warp: false,
         }
     }
 }

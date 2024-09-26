@@ -15,7 +15,7 @@ use crate::avm2_stub_method;
 use crate::display_object::TDisplayObject;
 use crate::drawing::Drawing;
 use crate::string::{AvmString, WStr};
-use ruffle_render::shape_utils::{DrawCommand, GradientType};
+use ruffle_render::shape_utils::{DrawCommand, FillRule, GradientType};
 use std::f64::consts::FRAC_1_SQRT_2;
 use swf::{
     Color, FillStyle, Fixed16, Fixed8, Gradient, GradientInterpolation, GradientRecord,
@@ -482,6 +482,8 @@ const UNIT_CIRCLE_POINTS: [(f64, f64); 5] = [
     (FRAC_1_SQRT_2, FRAC_1_SQRT_2),
     (0.4142135623730951, 1.0),
     (0.00000000000000006123233995736766, 1.0),
+    // TODO: should the above be just 0.0, instead of whatever Rust printed out?
+    // Same with 0.414... not being symmetric
 ];
 
 /* [
@@ -495,50 +497,61 @@ const UNIT_CIRCLE_POINTS: [(f64, f64); 5] = [
 ]; */
 
 /// Draw a roundrect.
+#[allow(clippy::too_many_arguments)]
 fn draw_round_rect_internal(
     draw: &mut Drawing,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
-    mut ellipse_width: f64,
-    mut ellipse_height: f64,
+    top_left_width: f64,
+    top_left_height: f64,
+    top_right_width: f64,
+    top_right_height: f64,
+    bottom_left_width: f64,
+    bottom_left_height: f64,
+    bottom_right_width: f64,
+    bottom_right_height: f64,
 ) {
-    if ellipse_height.is_nan() {
-        ellipse_height = ellipse_width;
-    }
+    let top_left_width = top_left_width.min(width / 2.0);
+    let top_left_height = top_left_height.min(height / 2.0);
+    let top_right_width = top_right_width.min(width / 2.0);
+    let top_right_height = top_right_height.min(height / 2.0);
+    let bottom_left_width = bottom_left_width.min(width / 2.0);
+    let bottom_left_height = bottom_left_height.min(height / 2.0);
+    let bottom_right_width = bottom_right_width.min(width / 2.0);
+    let bottom_right_height = bottom_right_height.min(height / 2.0);
 
-    //Clamp the ellipse sizes to the size of the rectangle.
-    if ellipse_width > width {
-        ellipse_width = width;
-    }
+    let ucp = UNIT_CIRCLE_POINTS;
 
-    if ellipse_height > height {
-        ellipse_height = height;
-    }
+    let br_ellipse_center_x = x + width - bottom_right_width;
+    let br_ellipse_center_y = y + height - bottom_right_height;
+
+    let bl_ellipse_center_x = x + bottom_left_width;
+    let bl_ellipse_center_y = y + height - bottom_left_height;
+
+    let tl_ellipse_center_x = x + top_left_width;
+    let tl_ellipse_center_y = y + top_left_height;
+
+    let tr_ellipse_center_x = x + width - top_right_width;
+    let tr_ellipse_center_y = y + top_right_height;
 
     // We'll start from the bottom-right corner of the rectangle,
     // because that's what Flash Player does.
-    let ucp = UNIT_CIRCLE_POINTS;
 
-    let line_width = width - ellipse_width;
-    let line_height = height - ellipse_height;
-
-    let br_ellipse_center_x = x + ellipse_width / 2.0 + line_width;
-    let br_ellipse_center_y = y + ellipse_height / 2.0 + line_height;
-
-    let br_point_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[2].0;
-    let br_point_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[2].1;
+    // Middle of bottom-right ellipse
+    let br_point_x = br_ellipse_center_x + bottom_right_width * ucp[2].0;
+    let br_point_y = br_ellipse_center_y + bottom_right_height * ucp[2].1;
     let br_point = Point::from_pixels(br_point_x, br_point_y);
 
     draw.draw_command(DrawCommand::MoveTo(br_point));
 
-    let br_b_curve_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[3].0;
-    let br_b_curve_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[3].1;
+    let br_b_curve_x = br_ellipse_center_x + bottom_right_width * ucp[3].0;
+    let br_b_curve_y = br_ellipse_center_y + bottom_right_height * ucp[3].1;
     let br_b_curve = Point::from_pixels(br_b_curve_x, br_b_curve_y);
 
-    let right_b_point_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[4].0;
-    let right_b_point_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[4].1;
+    let right_b_point_x = br_ellipse_center_x + bottom_right_width * ucp[4].0;
+    let right_b_point_y = br_ellipse_center_y + bottom_right_height * ucp[4].1;
     let right_b_point = Point::from_pixels(right_b_point_x, right_b_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -546,24 +559,20 @@ fn draw_round_rect_internal(
         anchor: right_b_point,
     });
 
-    // Oh, since we're drawing roundrects, we also need to draw lines
-    // in between each ellipse. This is the bottom line.
-    let tl_ellipse_center_x = x + ellipse_width / 2.0;
-    let tl_ellipse_center_y = y + ellipse_height / 2.0;
-
-    let left_b_point_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[4].0;
-    let left_b_point_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[4].1;
+    // Bottom line
+    let left_b_point_x = bl_ellipse_center_x + bottom_left_width * ucp[4].0;
+    let left_b_point_y = bl_ellipse_center_y + bottom_left_height * ucp[4].1;
     let left_b_point = Point::from_pixels(left_b_point_x, left_b_point_y);
 
     draw.draw_command(DrawCommand::LineTo(left_b_point));
 
     // Bottom-left ellipse
-    let b_bl_curve_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[3].0;
-    let b_bl_curve_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[3].1;
+    let b_bl_curve_x = bl_ellipse_center_x - bottom_left_width * ucp[3].0;
+    let b_bl_curve_y = bl_ellipse_center_y + bottom_left_height * ucp[3].1;
     let b_bl_curve = Point::from_pixels(b_bl_curve_x, b_bl_curve_y);
 
-    let bl_point_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[2].0;
-    let bl_point_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[2].1;
+    let bl_point_x = bl_ellipse_center_x - bottom_left_width * ucp[2].0;
+    let bl_point_y = bl_ellipse_center_y + bottom_left_height * ucp[2].1;
     let bl_point = Point::from_pixels(bl_point_x, bl_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -571,12 +580,12 @@ fn draw_round_rect_internal(
         anchor: bl_point,
     });
 
-    let bl_l_curve_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[1].0;
-    let bl_l_curve_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[1].1;
+    let bl_l_curve_x = bl_ellipse_center_x - bottom_left_width * ucp[1].0;
+    let bl_l_curve_y = bl_ellipse_center_y + bottom_left_height * ucp[1].1;
     let bl_l_curve = Point::from_pixels(bl_l_curve_x, bl_l_curve_y);
 
-    let bottom_l_point_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[0].0;
-    let bottom_l_point_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[0].1;
+    let bottom_l_point_x = bl_ellipse_center_x - bottom_left_width * ucp[0].0;
+    let bottom_l_point_y = bl_ellipse_center_y + bottom_left_height * ucp[0].1;
     let bottom_l_point = Point::from_pixels(bottom_l_point_x, bottom_l_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -585,19 +594,19 @@ fn draw_round_rect_internal(
     });
 
     // Left side
-    let top_l_point_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[0].0;
-    let top_l_point_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[0].1;
+    let top_l_point_x = tl_ellipse_center_x - top_left_width * ucp[0].0;
+    let top_l_point_y = tl_ellipse_center_y - top_left_height * ucp[0].1;
     let top_l_point = Point::from_pixels(top_l_point_x, top_l_point_y);
 
     draw.draw_command(DrawCommand::LineTo(top_l_point));
 
     // Top-left ellipse
-    let l_tl_curve_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[1].0;
-    let l_tl_curve_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[1].1;
+    let l_tl_curve_x = tl_ellipse_center_x - top_left_width * ucp[1].0;
+    let l_tl_curve_y = tl_ellipse_center_y - top_left_height * ucp[1].1;
     let l_tl_curve = Point::from_pixels(l_tl_curve_x, l_tl_curve_y);
 
-    let tl_point_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[2].0;
-    let tl_point_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[2].1;
+    let tl_point_x = tl_ellipse_center_x - top_left_width * ucp[2].0;
+    let tl_point_y = tl_ellipse_center_y - top_left_height * ucp[2].1;
     let tl_point = Point::from_pixels(tl_point_x, tl_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -605,12 +614,12 @@ fn draw_round_rect_internal(
         anchor: tl_point,
     });
 
-    let tl_t_curve_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[3].0;
-    let tl_t_curve_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[3].1;
+    let tl_t_curve_x = tl_ellipse_center_x - top_left_width * ucp[3].0;
+    let tl_t_curve_y = tl_ellipse_center_y - top_left_height * ucp[3].1;
     let tl_t_curve = Point::from_pixels(tl_t_curve_x, tl_t_curve_y);
 
-    let left_t_point_x = tl_ellipse_center_x + ellipse_width / -2.0 * ucp[4].0;
-    let left_t_point_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[4].1;
+    let left_t_point_x = tl_ellipse_center_x - top_left_width * ucp[4].0;
+    let left_t_point_y = tl_ellipse_center_y - top_left_height * ucp[4].1;
     let left_t_point = Point::from_pixels(left_t_point_x, left_t_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -619,19 +628,19 @@ fn draw_round_rect_internal(
     });
 
     // Top side
-    let right_t_point_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[4].0;
-    let right_t_point_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[4].1;
+    let right_t_point_x = tr_ellipse_center_x + top_right_width * ucp[4].0;
+    let right_t_point_y = tr_ellipse_center_y - top_right_height * ucp[4].1;
     let right_t_point = Point::from_pixels(right_t_point_x, right_t_point_y);
 
     draw.draw_command(DrawCommand::LineTo(right_t_point));
 
     // Top-right ellipse
-    let t_tr_curve_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[3].0;
-    let t_tr_curve_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[3].1;
+    let t_tr_curve_x = tr_ellipse_center_x + top_right_width * ucp[3].0;
+    let t_tr_curve_y = tr_ellipse_center_y - top_right_height * ucp[3].1;
     let t_tr_curve = Point::from_pixels(t_tr_curve_x, t_tr_curve_y);
 
-    let tr_point_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[2].0;
-    let tr_point_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[2].1;
+    let tr_point_x = tr_ellipse_center_x + top_right_width * ucp[2].0;
+    let tr_point_y = tr_ellipse_center_y - top_right_height * ucp[2].1;
     let tr_point = Point::from_pixels(tr_point_x, tr_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -639,12 +648,12 @@ fn draw_round_rect_internal(
         anchor: tr_point,
     });
 
-    let tr_r_curve_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[1].0;
-    let tr_r_curve_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[1].1;
+    let tr_r_curve_x = tr_ellipse_center_x + top_right_width * ucp[1].0;
+    let tr_r_curve_y = tr_ellipse_center_y - top_right_height * ucp[1].1;
     let tr_r_curve = Point::from_pixels(tr_r_curve_x, tr_r_curve_y);
 
-    let top_r_point_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[0].0;
-    let top_r_point_y = tl_ellipse_center_y + ellipse_height / -2.0 * ucp[0].1;
+    let top_r_point_x = tr_ellipse_center_x + top_right_width * ucp[0].0;
+    let top_r_point_y = tr_ellipse_center_y - top_right_height * ucp[0].1;
     let top_r_point = Point::from_pixels(top_r_point_x, top_r_point_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -653,14 +662,14 @@ fn draw_round_rect_internal(
     });
 
     // Right side & other half of bottom-right ellipse
-    let bottom_r_point_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[0].0;
-    let bottom_r_point_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[0].1;
+    let bottom_r_point_x = br_ellipse_center_x + bottom_right_width * ucp[0].0;
+    let bottom_r_point_y = br_ellipse_center_y + bottom_right_height * ucp[0].1;
     let bottom_r_point = Point::from_pixels(bottom_r_point_x, bottom_r_point_y);
 
     draw.draw_command(DrawCommand::LineTo(bottom_r_point));
 
-    let r_br_curve_x = br_ellipse_center_x + ellipse_width / 2.0 * ucp[1].0;
-    let r_br_curve_y = br_ellipse_center_y + ellipse_height / 2.0 * ucp[1].1;
+    let r_br_curve_x = br_ellipse_center_x + bottom_right_width * ucp[1].0;
+    let r_br_curve_y = br_ellipse_center_y + bottom_right_height * ucp[1].1;
     let r_br_curve = Point::from_pixels(r_br_curve_x, r_br_curve_y);
 
     draw.draw_command(DrawCommand::QuadraticCurveTo {
@@ -681,7 +690,11 @@ pub fn draw_round_rect<'gc>(
         let width = args.get_f64(activation, 2)?;
         let height = args.get_f64(activation, 3)?;
         let ellipse_width = args.get_f64(activation, 4)?;
-        let ellipse_height = args.get_f64(activation, 5)?;
+        let mut ellipse_height = args.get_f64(activation, 5)?;
+
+        if ellipse_height.is_nan() {
+            ellipse_height = ellipse_width;
+        }
 
         if let Some(mut draw) = this.as_drawing(activation.context.gc_context) {
             draw_round_rect_internal(
@@ -690,8 +703,52 @@ pub fn draw_round_rect<'gc>(
                 y,
                 width,
                 height,
-                ellipse_width,
-                ellipse_height,
+                ellipse_width / 2.0,
+                ellipse_height / 2.0,
+                ellipse_width / 2.0,
+                ellipse_height / 2.0,
+                ellipse_width / 2.0,
+                ellipse_height / 2.0,
+                ellipse_width / 2.0,
+                ellipse_height / 2.0,
+            );
+        }
+    }
+
+    Ok(Value::Undefined)
+}
+
+/// Implements `Graphics.drawRoundRectComplex`
+pub fn draw_round_rect_complex<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(this) = this.as_display_object() {
+        let x = args.get_f64(activation, 0)?;
+        let y = args.get_f64(activation, 1)?;
+        let width = args.get_f64(activation, 2)?;
+        let height = args.get_f64(activation, 3)?;
+        let top_left = args.get_f64(activation, 4)?;
+        let top_right = args.get_f64(activation, 5)?;
+        let bottom_left = args.get_f64(activation, 6)?;
+        let bottom_right = args.get_f64(activation, 7)?;
+
+        if let Some(mut draw) = this.as_drawing(activation.context.gc_context) {
+            draw_round_rect_internal(
+                &mut draw,
+                x,
+                y,
+                width,
+                height,
+                top_left,
+                top_left,
+                top_right,
+                top_right,
+                bottom_left,
+                bottom_left,
+                bottom_right,
+                bottom_right,
             );
         }
     }
@@ -717,8 +774,14 @@ pub fn draw_circle<'gc>(
                 y - radius,
                 radius * 2.0,
                 radius * 2.0,
-                radius * 2.0,
-                radius * 2.0,
+                radius,
+                radius,
+                radius,
+                radius,
+                radius,
+                radius,
+                radius,
+                radius,
             );
         }
     }
@@ -739,7 +802,21 @@ pub fn draw_ellipse<'gc>(
         let height = args.get_f64(activation, 3)?;
 
         if let Some(mut draw) = this.as_drawing(activation.context.gc_context) {
-            draw_round_rect_internal(&mut draw, x, y, width, height, width, height)
+            draw_round_rect_internal(
+                &mut draw,
+                x,
+                y,
+                width,
+                height,
+                width / 2.0,
+                height / 2.0,
+                width / 2.0,
+                height / 2.0,
+                width / 2.0,
+                height / 2.0,
+                width / 2.0,
+                height / 2.0,
+            )
         }
     }
 
@@ -870,15 +947,15 @@ pub fn draw_path<'gc>(
     let mut drawing = this.as_drawing(activation.context.gc_context).unwrap();
     let commands = args.get_object(activation, 0, "commands")?;
     let data = args.get_object(activation, 1, "data")?;
-    // FIXME - implement winding, and fill  behavior described in the Flash docs
-    // (which is different from just running each command sequentially on `Graphics`)
-    let _winding = args.get_string(activation, 2)?;
+    let winding = args.get_string(activation, 2)?;
 
+    // FIXME - implement fill behavior described in the Flash docs
+    // (which is different from just running each command sequentially on `Graphics`)
     avm2_stub_method!(
         activation,
         "flash.display.Graphics",
         "drawPath",
-        "winding and fill behavior"
+        "fill behavior"
     );
 
     let commands = commands
@@ -886,18 +963,8 @@ pub fn draw_path<'gc>(
         .expect("commands is not a Vector");
     let data = data.as_vector_storage().expect("data is not a Vector");
 
-    process_commands(activation, &mut drawing, &commands, &data)?;
+    process_commands(activation, &mut drawing, &commands, &data, winding)?;
 
-    Ok(Value::Undefined)
-}
-
-/// Implements `Graphics.drawRoundRectComplex`
-pub fn draw_round_rect_complex<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_method!(activation, "flash.display.Graphics", "drawRoundRectComplex");
     Ok(Value::Undefined)
 }
 
@@ -1138,8 +1205,6 @@ pub fn draw_graphics_data<'gc>(
         .get_object(activation, 0, "graphicsData")?
         .as_vector_storage()
     {
-        //assert_eq!(vector.value_type(), Some(activation.avm2().classes().igraphicsdata));
-
         let this = this.as_display_object().expect("Bad this");
 
         if let Some(mut drawing) = this.as_drawing(activation.context.gc_context) {
@@ -1208,11 +1273,7 @@ pub fn read_graphics_data<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     avm2_stub_method!(activation, "flash.display.Graphics", "readGraphicsData");
-    let value_type = activation
-        .avm2()
-        .classes()
-        .igraphicsdata
-        .inner_class_definition();
+    let value_type = activation.avm2().class_defs().igraphicsdata;
     let new_storage = VectorStorage::new(0, false, Some(value_type), activation);
     Ok(VectorObject::from_vector(new_storage, activation)?.into())
 }
@@ -1247,6 +1308,7 @@ fn process_commands<'gc>(
     drawing: &mut Drawing,
     commands: &VectorStorage<'gc>,
     data: &VectorStorage<'gc>,
+    winding: AvmString,
 ) -> Result<(), Error<'gc>> {
     // Flash special cases this, and doesn't throw an error,
     // even if data has odd number of coordinates.
@@ -1259,6 +1321,16 @@ fn process_commands<'gc>(
     if data.length() % 2 != 0 {
         return Err(make_error_2004(activation, Error2004Type::ArgumentError));
     }
+
+    let rule = if winding == WStr::from_units(b"nonZero") {
+        FillRule::NonZero
+    } else if winding == WStr::from_units(b"evenOdd") {
+        FillRule::EvenOdd
+    } else {
+        return Err(make_error_2008(activation, "winding"));
+    };
+
+    drawing.set_fill_rule(Some(rule));
 
     fn process_command<'gc>(
         activation: &mut Activation<'_, 'gc>,
@@ -1331,6 +1403,9 @@ fn process_commands<'gc>(
         }
     }
 
+    // Reset winding rule after drawing commands
+    drawing.set_fill_rule(None);
+
     Ok(())
 }
 
@@ -1341,39 +1416,15 @@ fn handle_igraphics_data<'gc>(
 ) -> Result<(), Error<'gc>> {
     let class = obj.instance_class();
 
-    if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsbitmapfill
-            .inner_class_definition()
-    {
+    if class == activation.avm2().class_defs().graphicsbitmapfill {
         let style = handle_bitmap_fill(activation, drawing, obj)?;
         drawing.set_fill_style(Some(style));
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsendfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsendfill {
         drawing.set_fill_style(None);
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsgradientfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsgradientfill {
         let style = handle_gradient_fill(activation, obj)?;
         drawing.set_fill_style(Some(style));
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicspath
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicspath {
         let commands = obj
             .get_public_property("commands", activation)?
             .coerce_to_object(activation)?;
@@ -1382,8 +1433,7 @@ fn handle_igraphics_data<'gc>(
             .get_public_property("data", activation)?
             .coerce_to_object(activation)?;
 
-        //TODO implement winding
-        let _winding = obj
+        let winding = obj
             .get_public_property("winding", activation)?
             .coerce_to_string(activation)?;
 
@@ -1394,32 +1444,15 @@ fn handle_igraphics_data<'gc>(
                 .as_vector_storage()
                 .expect("commands is not a Vector"),
             &data.as_vector_storage().expect("data is not a Vector"),
+            winding,
         )?;
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicssolidfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicssolidfill {
         let style = handle_solid_fill(activation, obj)?;
         drawing.set_fill_style(Some(style));
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsshaderfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsshaderfill {
         tracing::warn!("Graphics shader fill unimplemented {:?}", class);
         drawing.set_fill_style(None);
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsstroke
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsstroke {
         let thickness = obj
             .get_public_property("thickness", activation)?
             .coerce_to_number(activation)?;
@@ -1475,13 +1508,7 @@ fn handle_igraphics_data<'gc>(
 
             drawing.set_line_style(Some(line_style));
         }
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicstrianglepath
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicstrianglepath {
         handle_graphics_triangle_path(activation, drawing, obj)?;
     } else {
         panic!("Unknown graphics data class {:?}", class);
@@ -1529,48 +1556,18 @@ fn handle_igraphics_fill<'gc>(
 ) -> Result<Option<FillStyle>, Error<'gc>> {
     let class = obj.instance_class();
 
-    if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsbitmapfill
-            .inner_class_definition()
-    {
+    if class == activation.avm2().class_defs().graphicsbitmapfill {
         let style = handle_bitmap_fill(activation, drawing, obj)?;
         Ok(Some(style))
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsendfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsendfill {
         Ok(None)
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsgradientfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsgradientfill {
         let style = handle_gradient_fill(activation, obj)?;
         Ok(Some(style))
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicssolidfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicssolidfill {
         let style = handle_solid_fill(activation, obj)?;
         Ok(Some(style))
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsshaderfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsshaderfill {
         tracing::warn!("Graphics shader fill unimplemented {:?}", class);
         Ok(None)
     } else {

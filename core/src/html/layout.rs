@@ -254,7 +254,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
     /// parameter will result in no empty lines being added.
     fn fixup_line(
         &mut self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         only_line: bool,
         final_line_of_para: bool,
         end: usize,
@@ -281,6 +281,10 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
             }
 
             box_count += 1;
+        }
+
+        if self.boxes.is_empty() {
+            self.append_text(WStr::empty(), end, end, span);
         }
 
         let mut line_bounds = line_bounds.unwrap_or_default();
@@ -336,10 +340,6 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
             box_count += 1;
         }
 
-        if self.boxes.is_empty() {
-            self.append_text(WStr::empty(), end, end, span);
-        }
-
         self.append_underlines();
 
         line_bounds += Position::from((left_adjustment + align_adjustment, Twips::ZERO));
@@ -364,6 +364,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
         let start = first_box.start();
         let bounds = boxes
             .iter()
+            .filter(|b| b.is_text_box())
             .fold(first_box.bounds, |bounds, b| bounds + b.bounds);
 
         // Update last line's end position to take into account the delimiter.
@@ -401,7 +402,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
     /// the current positions into the text and format spans we are laying out.
     fn explicit_newline(
         &mut self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         end: usize,
         span: &TextSpan,
         font_type: FontType,
@@ -417,6 +418,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
         self.is_first_line = true;
         self.has_line_break = true;
+        self.max_font_size = Twips::from_pixels(self.current_line_span.font.size);
     }
 
     /// Adjust the text layout cursor down to the next line.
@@ -429,7 +431,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
     /// the current positions into the text and format spans we are laying out.
     fn newline(
         &mut self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         end: usize,
         span: &TextSpan,
         font_type: FontType,
@@ -445,6 +447,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
         self.is_first_line = false;
         self.has_line_break = true;
+        self.max_font_size = Twips::from_pixels(self.current_line_span.font.size);
     }
 
     /// Adjust the text layout cursor in response to a tab.
@@ -484,7 +487,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
     fn resolve_font(
         &mut self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         span: &TextSpan,
         font_type: FontType,
     ) -> Option<Font<'gc>> {
@@ -627,7 +630,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
     /// cursor is moved down.
     fn append_bullet(
         &mut self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         span: &TextSpan,
         font_type: FontType,
     ) {
@@ -709,7 +712,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
     /// Destroy the layout context, returning the newly constructed layout list.
     fn end_layout(
         mut self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         fs: &'a FormatSpans,
         font_type: FontType,
     ) -> Layout<'gc> {
@@ -859,6 +862,8 @@ impl<'gc> LayoutLine<'gc> {
 #[collect(no_drop)]
 pub struct LayoutBox<'gc> {
     /// The rectangle corresponding to the outer boundaries of the content box.
+    ///
+    /// TODO Currently, only text boxes have meaningful bounds.
     #[collect(require_static)]
     bounds: BoxBounds<Twips>,
 
@@ -1005,7 +1010,7 @@ impl<'gc> LayoutBox<'gc> {
 /// Construct a new layout from text spans.
 pub fn lower_from_text_spans<'gc>(
     fs: &FormatSpans,
-    context: &mut UpdateContext<'_, 'gc>,
+    context: &mut UpdateContext<'gc>,
     movie: Arc<SwfMovie>,
     bounds: Twips,
     is_word_wrap: bool,

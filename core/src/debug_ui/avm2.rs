@@ -1,5 +1,7 @@
 use crate::avm2::property::Property;
-use crate::avm2::{Activation, ClassObject, Error, Namespace, Object, TObject, Value};
+use crate::avm2::{
+    Activation, ArrayStorage, ClassObject, Error, Namespace, Object, TObject, Value,
+};
 use crate::context::UpdateContext;
 use crate::debug_ui::display_object::open_display_object_button;
 use crate::debug_ui::handle::{AVM2ObjectHandle, DisplayObjectHandle};
@@ -17,6 +19,7 @@ enum Panel {
     Information,
     #[default]
     Properties,
+    Elements,
     Class,
 }
 
@@ -38,13 +41,13 @@ impl Avm2ObjectWindow {
     pub fn show<'gc>(
         &mut self,
         egui_ctx: &egui::Context,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         object: Object<'gc>,
         messages: &mut Vec<Message>,
     ) -> bool {
         let mut keep_open = true;
         let domain = context.avm2.stage_domain();
-        let mut activation = Activation::from_domain(context.reborrow(), domain);
+        let mut activation = Activation::from_domain(context, domain);
         Window::new(object_name(activation.context.gc_context, object))
             .id(Id::new(object.as_ptr()))
             .open(&mut keep_open)
@@ -53,6 +56,9 @@ impl Avm2ObjectWindow {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.open_panel, Panel::Information, "Information");
                     ui.selectable_value(&mut self.open_panel, Panel::Properties, "Properties");
+                    if object.as_array_storage().is_some() {
+                        ui.selectable_value(&mut self.open_panel, Panel::Elements, "Elements");
+                    }
                     if object.as_class_object().is_some() {
                         ui.selectable_value(&mut self.open_panel, Panel::Class, "Class Info");
                     }
@@ -65,6 +71,11 @@ impl Avm2ObjectWindow {
                     }
                     Panel::Properties => {
                         self.show_properties(object, messages, &mut activation, ui)
+                    }
+                    Panel::Elements => {
+                        if let Some(array) = object.as_array_storage() {
+                            self.show_elements(array, messages, activation.context, ui)
+                        }
                     }
                     Panel::Class => {
                         if let Some(class) = object.as_class_object() {
@@ -89,7 +100,7 @@ impl Avm2ObjectWindow {
             .show(ui, |ui| {
                 if let Some(class) = object.instance_class().class_object() {
                     ui.label("Instance Of");
-                    show_avm2_value(ui, &mut activation.context, class.into(), messages);
+                    show_avm2_value(ui, activation.context, class.into(), messages);
                     ui.end_row();
                 }
 
@@ -97,7 +108,7 @@ impl Avm2ObjectWindow {
                     ui.label("Display Object");
                     open_display_object_button(
                         ui,
-                        &mut activation.context,
+                        activation.context,
                         messages,
                         object,
                         &mut self.hovered_debug_rect,
@@ -172,6 +183,47 @@ impl Avm2ObjectWindow {
             });
     }
 
+    fn show_elements<'gc>(
+        &mut self,
+        array: std::cell::Ref<ArrayStorage<'gc>>,
+        messages: &mut Vec<Message>,
+        context: &mut UpdateContext<'gc>,
+        ui: &mut Ui,
+    ) {
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .column(Column::initial(40.0))
+            .column(Column::remainder())
+            .auto_shrink([true, true])
+            .cell_layout(Layout::left_to_right(Align::Center))
+            .header(20.0, |mut header| {
+                header.col(|ui| {
+                    ui.strong("Index");
+                });
+                header.col(|ui| {
+                    ui.strong("Value");
+                });
+            })
+            .body(|mut body| {
+                for (index, value) in array.iter().enumerate() {
+                    body.row(18.0, |mut row| {
+                        row.col(|ui| {
+                            ui.label(index.to_string());
+                        });
+                        row.col(|ui| {
+                            if let Some(value) = value {
+                                show_avm2_value(ui, context, value, messages);
+                            } else {
+                                // Array hole.
+                                ui.weak("(Empty)");
+                            }
+                        });
+                    });
+                }
+            });
+    }
+
     fn show_class<'gc>(
         &mut self,
         class: ClassObject<'gc>,
@@ -205,7 +257,7 @@ impl Avm2ObjectWindow {
                 ui.vertical(|ui| {
                     let mut superclass = Some(class);
                     while let Some(class) = superclass {
-                        show_avm2_value(ui, &mut activation.context, class.into(), messages);
+                        show_avm2_value(ui, activation.context, class.into(), messages);
                         superclass = class.superclass_object();
                     }
                 });
@@ -236,10 +288,10 @@ impl Avm2ObjectWindow {
     ) {
         let mut entries = Vec::<(String, Namespace<'gc>, Property)>::new();
         // We can't access things whilst we iterate the vtable, so clone and sort it all here
-        if let Some(vtable) = object.vtable() {
-            for (name, ns, prop) in vtable.resolved_traits().iter() {
-                entries.push((name.to_string(), ns, *prop));
-            }
+        let vtable = object.vtable();
+
+        for (name, ns, prop) in vtable.resolved_traits().iter() {
+            entries.push((name.to_string(), ns, *prop));
         }
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -312,7 +364,7 @@ impl Avm2ObjectWindow {
                     label_col(&mut row);
                     row.col(|ui| {
                         let value = object.get_slot(slot_id);
-                        ValueResultWidget::new(activation, value).show(ui, messages);
+                        ValueResultWidget::new(activation, Ok(value)).show(ui, messages);
                     });
                     row.col(|_| {});
                 });
@@ -358,7 +410,7 @@ enum ValueWidget {
 }
 
 impl ValueWidget {
-    fn new<'gc>(context: &mut UpdateContext<'_, 'gc>, value: Value<'gc>) -> Self {
+    fn new<'gc>(context: &mut UpdateContext<'gc>, value: Value<'gc>) -> Self {
         match value {
             Value::Undefined => ValueWidget::Other(Cow::Borrowed("Undefined")),
             Value::Null => ValueWidget::Other(Cow::Borrowed("Null")),
@@ -403,7 +455,7 @@ impl ValueResultWidget {
         value: Result<Value<'gc>, Error<'gc>>,
     ) -> Self {
         match value {
-            Ok(value) => Self::Value(ValueWidget::new(&mut activation.context, value)),
+            Ok(value) => Self::Value(ValueWidget::new(activation.context, value)),
             Err(error) => Self::Error(format!("{error:?})")),
         }
     }
@@ -422,7 +474,7 @@ impl ValueResultWidget {
 
 pub fn show_avm2_value<'gc>(
     ui: &mut Ui,
-    context: &mut UpdateContext<'_, 'gc>,
+    context: &mut UpdateContext<'gc>,
     value: Value<'gc>,
     messages: &mut Vec<Message>,
 ) {

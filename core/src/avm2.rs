@@ -4,7 +4,9 @@ use std::rc::Rc;
 
 use crate::avm2::class::AllocatorFn;
 use crate::avm2::error::make_error_1107;
-use crate::avm2::globals::SystemClasses;
+use crate::avm2::globals::{
+    init_builtin_system_classes, init_native_system_classes, SystemClassDefs, SystemClasses,
+};
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::scope::ScopeChain;
 use crate::avm2::script::{Script, TranslationUnit};
@@ -15,7 +17,8 @@ use crate::tag_utils::SwfMovie;
 use crate::PlayerRuntime;
 
 use fnv::FnvHashMap;
-use gc_arena::{Collect, GcCell, Mutation};
+use gc_arena::lock::GcRefLock;
+use gc_arena::{Collect, Gc, Mutation};
 use std::sync::Arc;
 use swf::avm2::read::Reader;
 use swf::DoAbc2Flag;
@@ -78,8 +81,8 @@ pub use crate::avm2::domain::{Domain, DomainPtr};
 pub use crate::avm2::error::Error;
 pub use crate::avm2::flv::FlvValueAvm2Ext;
 pub use crate::avm2::globals::flash::ui::context_menu::make_context_menu_state;
-pub use crate::avm2::multiname::Multiname;
-pub use crate::avm2::namespace::Namespace;
+pub use crate::avm2::multiname::{CommonMultinames, Multiname};
+pub use crate::avm2::namespace::{CommonNamespaces, Namespace};
 pub use crate::avm2::object::{
     ArrayObject, BitmapDataObject, ClassObject, EventObject, Object, SoundChannelObject,
     StageObject, TObject,
@@ -90,7 +93,6 @@ pub use crate::avm2::value::Value;
 use self::api_version::ApiVersion;
 use self::object::WeakObject;
 use self::scope::Scope;
-use num_traits::FromPrimitive;
 
 const BROADCAST_WHITELIST: [&str; 4] = ["enterFrame", "exitFrame", "frameConstructed", "render"];
 
@@ -112,7 +114,7 @@ pub struct Avm2<'gc> {
     scope_stack: Vec<Scope<'gc>>,
 
     /// The current call stack of the player.
-    call_stack: GcCell<'gc, CallStack<'gc>>,
+    call_stack: GcRefLock<'gc, CallStack<'gc>>,
 
     /// This domain is used exclusively for classes from playerglobals
     playerglobals_domain: Domain<'gc>,
@@ -125,29 +127,17 @@ pub struct Avm2<'gc> {
     /// System classes.
     system_classes: Option<SystemClasses<'gc>>,
 
+    /// System class definitions.
+    system_class_defs: Option<SystemClassDefs<'gc>>,
+
     /// Top-level global object. It contains most top-level types (Object, Class) and functions.
     /// However, it's not strictly defined which items end up there.
     toplevel_global_object: Option<Object<'gc>>,
 
-    /// The public namespace, versioned with `ApiVersion::ALL_VERSIONS`.
-    /// When calling into user code, you should almost always use `find_public_namespace`
-    /// instead, as it will return the correct version for the current call stack.
-    public_namespace_base_version: Namespace<'gc>,
-    // FIXME - make this an enum map once gc-arena supports it
-    public_namespaces: Vec<Namespace<'gc>>,
-    public_namespace_vm_internal: Namespace<'gc>,
-    pub internal_namespace: Namespace<'gc>,
-    pub as3_namespace: Namespace<'gc>,
-    pub vector_public_namespace: Namespace<'gc>,
-    pub vector_internal_namespace: Namespace<'gc>,
-    pub proxy_namespace: Namespace<'gc>,
-    // these are required to facilitate shared access between Rust and AS
-    pub flash_display_internal: Namespace<'gc>,
-    pub flash_utils_internal: Namespace<'gc>,
-    pub flash_geom_internal: Namespace<'gc>,
-    pub flash_events_internal: Namespace<'gc>,
-    pub flash_text_engine_internal: Namespace<'gc>,
-    pub flash_net_internal: Namespace<'gc>,
+    /// Pre-created known namespaces.
+    namespaces: Gc<'gc, CommonNamespaces<'gc>>,
+
+    pub multinames: Gc<'gc, CommonMultinames<'gc>>,
 
     #[collect(require_static)]
     native_method_table: &'static [Option<(&'static str, NativeMethodImpl)>],
@@ -156,7 +146,7 @@ pub struct Avm2<'gc> {
     native_instance_allocator_table: &'static [Option<(&'static str, AllocatorFn)>],
 
     #[collect(require_static)]
-    native_instance_init_table: &'static [Option<(&'static str, NativeMethodImpl)>],
+    native_super_initializer_table: &'static [Option<(&'static str, NativeMethodImpl)>],
 
     #[collect(require_static)]
     native_call_handler_table: &'static [Option<(&'static str, NativeMethodImpl)>],
@@ -203,56 +193,32 @@ impl<'gc> Avm2<'gc> {
         player_version: u8,
         player_runtime: PlayerRuntime,
     ) -> Self {
-        let playerglobals_domain = Domain::uninitialized_domain(context.gc_context, None);
-        let stage_domain =
-            Domain::uninitialized_domain(context.gc_context, Some(playerglobals_domain));
+        let mc = context.gc_context;
 
-        let public_namespaces = (0..=(ApiVersion::VM_INTERNAL as usize))
-            .map(|val| Namespace::package("", ApiVersion::from_usize(val).unwrap(), context))
-            .collect();
+        let playerglobals_domain = Domain::uninitialized_domain(mc, None);
+        let stage_domain = Domain::uninitialized_domain(mc, Some(playerglobals_domain));
+
+        let namespaces = CommonNamespaces::new(context);
+        let multinames = CommonMultinames::new(context, &namespaces);
 
         Self {
             player_version,
             player_runtime,
             stack: Vec::new(),
             scope_stack: Vec::new(),
-            call_stack: GcCell::new(context.gc_context, CallStack::new()),
+            call_stack: GcRefLock::new(mc, CallStack::new().into()),
             playerglobals_domain,
             stage_domain,
             system_classes: None,
+            system_class_defs: None,
             toplevel_global_object: None,
 
-            public_namespace_base_version: Namespace::package("", ApiVersion::AllVersions, context),
-            public_namespaces,
-            public_namespace_vm_internal: Namespace::package("", ApiVersion::VM_INTERNAL, context),
-            internal_namespace: Namespace::internal("", context),
-            as3_namespace: Namespace::package(
-                "http://adobe.com/AS3/2006/builtin",
-                ApiVersion::AllVersions,
-                context,
-            ),
-            vector_public_namespace: Namespace::package(
-                "__AS3__.vec",
-                ApiVersion::AllVersions,
-                context,
-            ),
-            vector_internal_namespace: Namespace::internal("__AS3__.vec", context),
-            proxy_namespace: Namespace::package(
-                "http://www.adobe.com/2006/actionscript/flash/proxy",
-                ApiVersion::AllVersions,
-                context,
-            ),
-            // these are required to facilitate shared access between Rust and AS
-            flash_display_internal: Namespace::internal("flash.display", context),
-            flash_utils_internal: Namespace::internal("flash.utils", context),
-            flash_geom_internal: Namespace::internal("flash.geom", context),
-            flash_events_internal: Namespace::internal("flash.events", context),
-            flash_text_engine_internal: Namespace::internal("flash.text.engine", context),
-            flash_net_internal: Namespace::internal("flash.net", context),
+            namespaces: Gc::new(mc, namespaces),
+            multinames: Gc::new(mc, multinames),
 
             native_method_table: Default::default(),
             native_instance_allocator_table: Default::default(),
-            native_instance_init_table: Default::default(),
+            native_super_initializer_table: Default::default(),
             native_call_handler_table: Default::default(),
             broadcast_list: Default::default(),
 
@@ -271,9 +237,9 @@ impl<'gc> Avm2<'gc> {
         }
     }
 
-    pub fn load_player_globals(context: &mut UpdateContext<'_, 'gc>) -> Result<(), Error<'gc>> {
+    pub fn load_player_globals(context: &mut UpdateContext<'gc>) -> Result<(), Error<'gc>> {
         let globals = context.avm2.playerglobals_domain;
-        let mut activation = Activation::from_domain(context.reborrow(), globals);
+        let mut activation = Activation::from_domain(context, globals);
         globals::load_player_globals(&mut activation, globals)
     }
 
@@ -286,6 +252,13 @@ impl<'gc> Avm2<'gc> {
     /// This function panics if the interpreter has not yet been initialized.
     pub fn classes(&self) -> &SystemClasses<'gc> {
         self.system_classes.as_ref().unwrap()
+    }
+
+    /// Return the current set of system class definitions.
+    ///
+    /// This function panics if the interpreter has not yet been initialized.
+    pub fn class_defs(&self) -> &SystemClassDefs<'gc> {
+        self.system_class_defs.as_ref().unwrap()
     }
 
     pub fn toplevel_global_object(&self) -> Option<Object<'gc>> {
@@ -309,9 +282,9 @@ impl<'gc> Avm2<'gc> {
     /// Run a script's initializer method.
     pub fn run_script_initializer(
         script: Script<'gc>,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
     ) -> Result<(), Error<'gc>> {
-        let mut init_activation = Activation::from_script(context.reborrow(), script)?;
+        let mut init_activation = Activation::from_script(context, script)?;
 
         let (method, scope, _domain) = script.init();
         match method {
@@ -379,8 +352,8 @@ impl<'gc> Avm2<'gc> {
     }
 
     pub fn each_orphan_obj(
-        context: &mut UpdateContext<'_, 'gc>,
-        mut f: impl FnMut(DisplayObject<'gc>, &mut UpdateContext<'_, 'gc>),
+        context: &mut UpdateContext<'gc>,
+        mut f: impl FnMut(DisplayObject<'gc>, &mut UpdateContext<'gc>),
     ) {
         // Clone the Rc before iterating over it. Any modifications must go through
         // `Rc::make_mut` in `orphan_objects_mut`, which will leave this `Rc` unmodified.
@@ -398,7 +371,7 @@ impl<'gc> Avm2<'gc> {
     /// Called at the end of `run_all_phases_avm2` - removes any movies
     /// that have been garbage collected, or are no longer orphans
     /// (they've since acquired a parent).
-    pub fn cleanup_dead_orphans(context: &mut UpdateContext<'_, 'gc>) {
+    pub fn cleanup_dead_orphans(context: &mut UpdateContext<'gc>) {
         context.avm2.orphan_objects_mut().retain(|d| {
             if let Some(dobj) = valid_orphan(*d, context.gc_context) {
                 // All clips that become orphaned (have their parent removed, or start out with no parent)
@@ -437,7 +410,7 @@ impl<'gc> Avm2<'gc> {
     ///
     /// Returns `true` if the event has been handled.
     pub fn dispatch_event(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         event: Object<'gc>,
         target: Object<'gc>,
     ) -> bool {
@@ -451,7 +424,7 @@ impl<'gc> Avm2<'gc> {
     ///
     /// Returns `true` when the event would have been handled if not simulated.
     pub fn simulate_event_dispatch(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         event: Object<'gc>,
         target: Object<'gc>,
     ) -> bool {
@@ -459,7 +432,7 @@ impl<'gc> Avm2<'gc> {
     }
 
     fn dispatch_event_internal(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         event: Object<'gc>,
         target: Object<'gc>,
         simulate_dispatch: bool,
@@ -469,7 +442,7 @@ impl<'gc> Avm2<'gc> {
             .map(|e| e.event_type())
             .unwrap_or_else(|| panic!("cannot dispatch non-event object: {:?}", event));
 
-        let mut activation = Activation::from_nothing(context.reborrow());
+        let mut activation = Activation::from_nothing(context);
         match events::dispatch_event(&mut activation, target, event, simulate_dispatch) {
             Err(err) => {
                 tracing::error!(
@@ -486,7 +459,7 @@ impl<'gc> Avm2<'gc> {
 
     /// Add an object to the broadcast list.
     ///
-    /// Each broadcastable event contains it's own broadcast list. You must
+    /// Each broadcastable event contains its own broadcast list. You must
     /// register all objects that have event handlers with that event's
     /// broadcast list by calling this function. Attempting to register a
     /// broadcast listener for a non-broadcast event will do nothing.
@@ -494,7 +467,7 @@ impl<'gc> Avm2<'gc> {
     /// Attempts to register the same listener for the same event will also do
     /// nothing.
     pub fn register_broadcast_listener(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         object: Object<'gc>,
         event_name: AvmString<'gc>,
     ) {
@@ -530,7 +503,7 @@ impl<'gc> Avm2<'gc> {
     ///
     /// Attempts to broadcast a non-event object will panic.
     pub fn broadcast_event(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         event: Object<'gc>,
         on_type: ClassObject<'gc>,
     ) {
@@ -563,7 +536,7 @@ impl<'gc> Avm2<'gc> {
                 .copied();
 
             if let Some(object) = object.and_then(|obj| obj.upgrade(context.gc_context)) {
-                let mut activation = Activation::from_nothing(context.reborrow());
+                let mut activation = Activation::from_nothing(context);
 
                 if object.is_of_type(on_type.inner_class_definition()) {
                     if let Err(err) = events::dispatch_event(&mut activation, object, event, false)
@@ -592,9 +565,9 @@ impl<'gc> Avm2<'gc> {
         receiver: Value<'gc>,
         args: &[Value<'gc>],
         domain: Domain<'gc>,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
     ) -> Result<(), String> {
-        let mut evt_activation = Activation::from_domain(context.reborrow(), domain);
+        let mut evt_activation = Activation::from_domain(context, domain);
         callable
             .call(receiver, args, &mut evt_activation)
             .map_err(|e| format!("{e:?}"))?;
@@ -604,7 +577,7 @@ impl<'gc> Avm2<'gc> {
 
     /// Load an ABC file embedded in a `DoAbc` or `DoAbc2` tag.
     pub fn do_abc(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         data: &[u8],
         name: Option<AvmString<'gc>>,
         flags: DoAbc2Flag,
@@ -615,19 +588,18 @@ impl<'gc> Avm2<'gc> {
         let abc = match reader.read() {
             Ok(abc) => abc,
             Err(_) => {
-                let mut activation = Activation::from_nothing(context.reborrow());
+                let mut activation = Activation::from_nothing(context);
                 return Err(make_error_1107(&mut activation));
             }
         };
 
-        let mut activation = Activation::from_domain(context.reborrow(), domain);
+        let mut activation = Activation::from_domain(context, domain);
         // Make sure we have the correct domain for code that tries to access it
         // using `activation.domain()`
         activation.set_outer(ScopeChain::new(domain));
 
         let num_scripts = abc.scripts.len();
-        let tunit =
-            TranslationUnit::from_abc(abc, domain, name, movie, activation.context.gc_context);
+        let tunit = TranslationUnit::from_abc(abc, domain, name, movie, activation.gc());
         tunit.load_classes(&mut activation)?;
         for i in 0..num_scripts {
             tunit.load_script(i as u32, &mut activation)?;
@@ -639,31 +611,64 @@ impl<'gc> Avm2<'gc> {
         Ok(None)
     }
 
+    /// Load the playerglobal ABC file.
+    pub fn load_builtin_abc(
+        context: &mut UpdateContext<'gc>,
+        data: &[u8],
+        domain: Domain<'gc>,
+        movie: Arc<SwfMovie>,
+    ) {
+        let mut reader = Reader::new(data);
+        let abc = match reader.read() {
+            Ok(abc) => abc,
+            Err(_) => panic!("Builtin ABC should be valid"),
+        };
+
+        let mut activation = Activation::from_domain(context, domain);
+        // Make sure we have the correct domain for code that tries to access it
+        // using `activation.domain()`
+        activation.set_outer(ScopeChain::new(domain));
+
+        let tunit = TranslationUnit::from_abc(abc, domain, None, movie, activation.gc());
+        tunit
+            .load_classes(&mut activation)
+            .expect("Classes should load");
+
+        // The second script (script #1) is Toplevel.as, and includes important
+        // builtin classes such as Namespace, QName, and XML.
+        tunit
+            .load_script(1, &mut activation)
+            .expect("Script should load");
+        init_builtin_system_classes(&mut activation);
+
+        // The first script (script #0) is globals.as, and includes other builtin
+        // classes that are less critical for the AVM to load.
+        tunit
+            .load_script(0, &mut activation)
+            .expect("Script should load");
+        init_native_system_classes(&mut activation);
+    }
+
     pub fn stage_domain(&self) -> Domain<'gc> {
         self.stage_domain
     }
 
     /// Pushes an executable on the call stack
-    pub fn push_call(
-        &self,
-        mc: &Mutation<'gc>,
-        method: Method<'gc>,
-        superclass: Option<ClassObject<'gc>>,
-    ) {
-        self.call_stack.write(mc).push(method, superclass)
+    pub fn push_call(&self, mc: &Mutation<'gc>, method: Method<'gc>, class: Option<Class<'gc>>) {
+        self.call_stack.borrow_mut(mc).push(method, class)
     }
 
     /// Pushes script initializer (global init) on the call stack
     pub fn push_global_init(&self, mc: &Mutation<'gc>, script: Script<'gc>) {
-        self.call_stack.write(mc).push_global_init(script)
+        self.call_stack.borrow_mut(mc).push_global_init(script)
     }
 
     /// Pops an executable off the call stack
     pub fn pop_call(&self, mc: &Mutation<'gc>) -> Option<CallNode<'gc>> {
-        self.call_stack.write(mc).pop()
+        self.call_stack.borrow_mut(mc).pop()
     }
 
-    pub fn call_stack(&self) -> GcCell<'gc, CallStack<'gc>> {
+    pub fn call_stack(&self) -> GcRefLock<'gc, CallStack<'gc>> {
         self.call_stack
     }
 
@@ -796,7 +801,7 @@ impl<'gc> Avm2<'gc> {
     /// See `AvmCore::findPublicNamespace()`
     /// https://github.com/adobe/avmplus/blob/858d034a3bd3a54d9b70909386435cf4aec81d21/core/AvmCore.cpp#L5809C25-L5809C25
     pub fn find_public_namespace(&self) -> Namespace<'gc> {
-        self.public_namespaces[self.root_api_version as usize]
+        self.namespaces.public_for(self.root_api_version)
     }
 
     pub fn optimizer_enabled(&self) -> bool {

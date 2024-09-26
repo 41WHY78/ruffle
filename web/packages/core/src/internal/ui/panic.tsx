@@ -1,4 +1,4 @@
-import { text, textAsParagraphs } from "../../i18n";
+import { text, textAsParagraphs } from "../i18n";
 import { createRef } from "tsx-dom";
 import { buildInfo } from "../../build-info";
 import { RUFFLE_ORIGIN } from "../constants";
@@ -260,7 +260,8 @@ function createPanicError(error: Error | null): {
         }
 
         if (
-            message.includes("could not download wasm module") &&
+            (message.includes("could not download wasm module") ||
+            message.includes("webassembly compilation aborted")) &&
             error.cause.name === "TypeError"
         ) {
             // Usually a transient network error or botched deployment

@@ -14,7 +14,7 @@ concurrency:
 jobs:
   changes:
     name: Paths filter
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       should_run: ${{ steps.filter.outputs.src }}
     steps:
@@ -36,7 +36,7 @@ jobs:
       fail-fast: false
       matrix:
         node_version: ["20", "22"]
-        os: [ubuntu-22.04, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -60,9 +60,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # wasm-bindgen-cli version must match wasm-bindgen crate version.
-      # Be sure to update in release_nightly.yml, web/Cargo.toml and web/README.md.
+      # Be sure to update in release_nightly.yml, Cargo.toml, web/docker/Dockerfile,
+      # and web/README.md as well.
       - name: Install wasm-bindgen
-        run: cargo install wasm-bindgen-cli --version 0.2.92
+        run: cargo install wasm-bindgen-cli --version 0.2.93
 
       # Keep the version number in sync in all workflows,
       # and in the extension builder Dockerfile!
@@ -70,7 +71,7 @@ jobs:
         uses: sigoden/install-binary@v1
         with:
           repo: WebAssembly/binaryen
-          tag: version_118
+          tag: version_119
           name: wasm-opt
 
       - name: Build
@@ -106,7 +107,7 @@ jobs:
     strategy:
       matrix:
         node_version: ["20", "22"]
-        os: [ubuntu-22.04, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
 
     steps:
       - name: No-op

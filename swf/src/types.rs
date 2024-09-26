@@ -276,7 +276,7 @@ bitflags! {
 
         /// Whether this SWF should be placed in the network sandbox when run locally.
         ///
-        /// SWFs in the network sandbox can only access network resources,  not local resources.
+        /// SWFs in the network sandbox can only access network resources, not local resources.
         /// SWFs in the local sandbox can only access local resources, not network resources.
         const USE_NETWORK_SANDBOX = 1 << 0;
     }
@@ -1785,7 +1785,8 @@ pub type DoAction<'a> = &'a [u8];
 
 pub type JpegTables<'a> = &'a [u8];
 
-/// `ProductInfo` contains information about the software used to generate the SWF.
+/// Contains information about the software used to generate the SWF.
+///
 /// Not documented in the SWF19 reference. Emitted by mxmlc.
 /// See <http://wahlers.com.br/claus/blog/undocumented-swf-tags-written-by-mxmlc/>
 #[derive(Clone, Debug, Eq, PartialEq)]

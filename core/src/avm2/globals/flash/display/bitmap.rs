@@ -19,7 +19,7 @@ pub fn bitmap_allocator<'gc>(
     class: ClassObject<'gc>,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<Object<'gc>, Error<'gc>> {
-    let bitmap_cls = activation.avm2().classes().bitmap.inner_class_definition();
+    let bitmap_cls = activation.avm2().class_defs().bitmap;
     let bitmapdata_cls = activation.context.avm2.classes().bitmapdata;
 
     let mut class_def = Some(class.inner_class_definition());
@@ -98,7 +98,7 @@ pub fn init<'gc>(
 
     if let Some(bitmap) = this.as_display_object().and_then(|dobj| dobj.as_bitmap()) {
         if let Some(bitmap_data) = bitmap_data {
-            bitmap.set_bitmap_data(&mut activation.context, bitmap_data);
+            bitmap.set_bitmap_data(activation.context, bitmap_data);
         }
         bitmap.set_smoothing(activation.context.gc_context, smoothing);
         bitmap.set_pixel_snapping(activation.context.gc_context, pixel_snapping);
@@ -144,7 +144,7 @@ pub fn set_bitmap_data<'gc>(
                 .as_bitmap_data()
                 .ok_or_else(|| Error::RustError("Argument was not a BitmapData".into()))?
         };
-        bitmap.set_bitmap_data(&mut activation.context, bitmap_data);
+        bitmap.set_bitmap_data(activation.context, bitmap_data);
     }
 
     Ok(Value::Undefined)

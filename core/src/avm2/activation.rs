@@ -105,7 +105,7 @@ pub struct Activation<'a, 'gc: 'a> {
     /// is a bytecode method, the movie will instead be the movie that the bytecode method came from.
     caller_movie: Option<Arc<SwfMovie>>,
 
-    /// The class that yielded the currently executing method.
+    /// The superclass of the class that yielded the currently executing method.
     ///
     /// This is used to maintain continuity when multiple methods supercall
     /// into one another. For example, if a class method supercalls a
@@ -115,7 +115,9 @@ pub struct Activation<'a, 'gc: 'a> {
     /// the same method again.
     ///
     /// This will not be available outside of method, setter, or getter calls.
-    subclass_object: Option<ClassObject<'gc>>,
+    bound_superclass_object: Option<ClassObject<'gc>>,
+
+    bound_class: Option<Class<'gc>>,
 
     /// The class of all objects returned from `newactivation`.
     ///
@@ -139,7 +141,7 @@ pub struct Activation<'a, 'gc: 'a> {
     /// Maximum size for the scope frame.
     max_scope_size: usize,
 
-    pub context: UpdateContext<'a, 'gc>,
+    pub context: &'a mut UpdateContext<'gc>,
 }
 
 impl<'a, 'gc> Activation<'a, 'gc> {
@@ -158,7 +160,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ///
     /// It is a logic error to attempt to run AVM2 code in a nothing
     /// `Activation`.
-    pub fn from_nothing(context: UpdateContext<'a, 'gc>) -> Self {
+    pub fn from_nothing(context: &'a mut UpdateContext<'gc>) -> Self {
         let local_registers = RegisterSet::new(0);
 
         Self {
@@ -168,7 +170,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             outer: ScopeChain::new(context.avm2.stage_domain),
             caller_domain: None,
             caller_movie: None,
-            subclass_object: None,
+            bound_superclass_object: None,
+            bound_class: None,
             activation_class: None,
             stack_depth: context.avm2.stack.len(),
             scope_depth: context.avm2.scope_stack.len(),
@@ -187,7 +190,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// The 'Domain' should come from the SwfMovie associated with whatever
     /// action you're performing. When running frame scripts, this is the
     /// `SwfMovie` associated with the `MovieClip` being processed.
-    pub fn from_domain(context: UpdateContext<'a, 'gc>, domain: Domain<'gc>) -> Self {
+    pub fn from_domain(context: &'a mut UpdateContext<'gc>, domain: Domain<'gc>) -> Self {
         let local_registers = RegisterSet::new(0);
 
         Self {
@@ -197,7 +200,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             outer: ScopeChain::new(context.avm2.stage_domain),
             caller_domain: Some(domain),
             caller_movie: None,
-            subclass_object: None,
+            bound_superclass_object: None,
+            bound_class: None,
             activation_class: None,
             stack_depth: context.avm2.stack.len(),
             scope_depth: context.avm2.scope_stack.len(),
@@ -210,7 +214,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// Construct an activation for the execution of a particular script's
     /// initializer method.
     pub fn from_script(
-        mut context: UpdateContext<'a, 'gc>,
+        context: &'a mut UpdateContext<'gc>,
         script: Script<'gc>,
     ) -> Result<Self, Error<'gc>> {
         let (method, global_object, domain) = script.init();
@@ -240,7 +244,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             BytecodeMethod::get_or_init_activation_class(method, context.gc_context, || {
                 let translation_unit = method.translation_unit();
                 let abc_method = method.method();
-                let mut dummy_activation = Activation::from_domain(context.reborrow(), domain);
+                let mut dummy_activation = Activation::from_domain(context, domain);
                 dummy_activation.set_outer(ScopeChain::new(domain));
                 let activation_class = Class::for_activation(
                     &mut dummy_activation,
@@ -262,7 +266,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             outer: ScopeChain::new(domain),
             caller_domain: Some(domain),
             caller_movie: script.translation_unit().map(|t| t.movie()),
-            subclass_object: None,
+            bound_superclass_object: Some(context.avm2.classes().object), // The script global class extends Object
+            bound_class: Some(script.global_class()),
             activation_class,
             stack_depth: context.avm2.stack.len(),
             scope_depth: context.avm2.scope_stack.len(),
@@ -273,8 +278,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         // Run verifier for bytecode methods
         if let Method::Bytecode(method) = method {
-            if method.verified_info.read().is_none() {
-                method.verify(&mut created_activation)?;
+            if method.verified_info.borrow().is_none() {
+                BytecodeMethod::verify(method, &mut created_activation)?;
             }
         }
 
@@ -315,7 +320,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         value: Option<&Value<'gc>>,
         param_config: &ResolvedParamConfig<'gc>,
         user_arguments: &[Value<'gc>],
-        callee: Option<Object<'gc>>,
+        bound_class: Option<Class<'gc>>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let arg = if let Some(value) = value {
             value
@@ -330,7 +335,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 self,
                 method,
                 user_arguments,
-                callee,
+                bound_class,
             )?));
         };
 
@@ -353,7 +358,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         method: Method<'gc>,
         user_arguments: &[Value<'gc>],
         signature: &[ResolvedParamConfig<'gc>],
-        callee: Option<Object<'gc>>,
+        bound_class: Option<Class<'gc>>,
     ) -> Result<Vec<Value<'gc>>, Error<'gc>> {
         let mut arguments_list = Vec::new();
         for (arg, param_config) in user_arguments.iter().zip(signature.iter()) {
@@ -362,7 +367,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 Some(arg),
                 param_config,
                 user_arguments,
-                callee,
+                bound_class,
             )?);
         }
 
@@ -379,7 +384,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                         None,
                         param_config,
                         user_arguments,
-                        callee,
+                        bound_class,
                     )?);
                 }
             }
@@ -393,13 +398,15 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// method.
     /// NOTE: this is intended to be used immediately after from_nothing(),
     /// as a more efficient replacement for direct `Activation::from_method()`
+    #[allow(clippy::too_many_arguments)]
     pub fn init_from_method(
         &mut self,
         method: Gc<'gc, BytecodeMethod<'gc>>,
         outer: ScopeChain<'gc>,
         this: Object<'gc>,
         user_arguments: &[Value<'gc>],
-        subclass_object: Option<ClassObject<'gc>>,
+        bound_superclass_object: Option<ClassObject<'gc>>,
+        bound_class: Option<Class<'gc>>,
         callee: Object<'gc>,
     ) -> Result<(), Error<'gc>> {
         let body: Result<_, Error<'gc>> = method
@@ -416,8 +423,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             BytecodeMethod::get_or_init_activation_class(method, self.context.gc_context, || {
                 let translation_unit = method.translation_unit();
                 let abc_method = method.method();
-                let mut dummy_activation =
-                    Activation::from_domain(self.context.reborrow(), outer.domain());
+                let mut dummy_activation = Activation::from_domain(self.context, outer.domain());
                 dummy_activation.set_outer(outer);
                 let activation_class = Class::for_activation(
                     &mut dummy_activation,
@@ -434,7 +440,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.outer = outer;
         self.caller_domain = Some(outer.domain());
         self.caller_movie = Some(method.owner_movie());
-        self.subclass_object = subclass_object;
+        self.bound_superclass_object = bound_superclass_object;
+        self.bound_class = bound_class;
         self.activation_class = activation_class;
         self.stack_depth = self.context.avm2.stack.len();
         self.scope_depth = self.context.avm2.scope_stack.len();
@@ -442,11 +449,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.max_scope_size = (body.max_scope_depth - body.init_scope_depth) as usize;
 
         // Everything is now setup for the verifier to run
-        if method.verified_info.read().is_none() {
-            method.verify(self)?;
+        if method.verified_info.borrow().is_none() {
+            BytecodeMethod::verify(method, self)?;
         }
 
-        let verified_info = method.verified_info.read();
+        let verified_info = method.verified_info.borrow();
         let signature = &verified_info.as_ref().unwrap().param_config;
 
         if user_arguments.len() > signature.len() && !has_rest_or_args {
@@ -454,7 +461,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 self,
                 Method::Bytecode(method),
                 user_arguments,
-                Some(callee),
+                bound_class,
             )?));
         }
 
@@ -463,7 +470,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             Method::Bytecode(method),
             user_arguments,
             signature,
-            Some(callee),
+            bound_class,
         )?;
 
         {
@@ -523,8 +530,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// function to construct a new activation for the builtin so that it can
     /// properly supercall.
     pub fn from_builtin(
-        context: UpdateContext<'a, 'gc>,
-        subclass_object: Option<ClassObject<'gc>>,
+        context: &'a mut UpdateContext<'gc>,
+        bound_superclass_object: Option<ClassObject<'gc>>,
+        bound_class: Option<Class<'gc>>,
         outer: ScopeChain<'gc>,
         caller_domain: Option<Domain<'gc>>,
         caller_movie: Option<Arc<SwfMovie>>,
@@ -538,7 +546,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             outer,
             caller_domain,
             caller_movie,
-            subclass_object,
+            bound_superclass_object,
+            bound_class,
             activation_class: None,
             stack_depth: context.avm2.stack.len(),
             scope_depth: context.avm2.scope_stack.len(),
@@ -554,15 +563,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         receiver: Object<'gc>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Error<'gc>> {
-        let superclass_object = self
-            .subclass_object()
-            .and_then(|c| c.superclass_object())
-            .ok_or_else(|| {
-                Error::from("Attempted to call super constructor without a superclass.")
-            });
-        let superclass_object = superclass_object?;
+        let bound_superclass_object = self
+            .bound_superclass_object
+            .expect("Superclass object is required to run super_init");
 
-        superclass_object.call_native_init(receiver.into(), args, self)
+        bound_superclass_object.call_super_init(receiver.into(), args, self)
     }
 
     /// Retrieve a local register.
@@ -637,15 +642,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.context.borrow_gc()
     }
 
-    /// Get the class that defined the currently-executing method, if it
-    /// exists.
-    ///
-    /// If the currently-executing method is not part of an ES4 class, then
-    /// this yields `None`.
-    pub fn subclass_object(&self) -> Option<ClassObject<'gc>> {
-        self.subclass_object
-    }
-
     pub fn scope_frame(&self) -> &[Scope<'gc>] {
         &self.context.avm2.scope_stack[self.scope_depth..]
     }
@@ -712,20 +708,22 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// Get the superclass of the class that defined the currently-executing
     /// method, if it exists.
     ///
-    /// If the currently-executing method is not part of an ES4 class, or the
-    /// class does not have a superclass, then this yields an error. The `name`
-    /// parameter allows you to provide the name of a property you were
-    /// attempting to access on the object.
-    pub fn superclass_object(&self, name: &Multiname<'gc>) -> Result<ClassObject<'gc>, Error<'gc>> {
-        self.subclass_object
-            .and_then(|bc| bc.superclass_object())
-            .ok_or_else(|| {
-                format!(
-                    "Cannot call supermethod (void) {} without a superclass",
-                    name.to_qualified_name(self.context.gc_context)
-                )
-                .into()
-            })
+    /// If the currently-executing method is not part of a class, or the class
+    /// does not have a superclass, then this panics. The `name` parameter
+    /// allows you to provide the name of a property you were attempting to
+    /// access on the object.
+    pub fn bound_superclass_object(&self, name: &Multiname<'gc>) -> ClassObject<'gc> {
+        self.bound_superclass_object.unwrap_or_else(|| {
+            panic!(
+                "Cannot call supermethod {} without a superclass",
+                name.to_qualified_name(self.context.gc_context),
+            )
+        })
+    }
+
+    /// Get the class that defined the currently-executing method, if it exists.
+    pub fn bound_class(&self) -> Option<Class<'gc>> {
+        self.bound_class
     }
 
     /// Retrieve a namespace from the current constant pool.
@@ -734,9 +732,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         index: Index<AbcNamespace>,
     ) -> Result<Namespace<'gc>, Error<'gc>> {
-        method
-            .translation_unit()
-            .pool_namespace(index, &mut self.context)
+        method.translation_unit().pool_namespace(self, index)
     }
 
     /// Retrieve a method entry from the current ABC file's method table.
@@ -757,7 +753,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ) -> Result<Value<'gc>, Error<'gc>> {
         // The method must be verified at this point
 
-        let verified_info = method.verified_info.read();
+        let verified_info = method.verified_info.borrow();
         let verified_code = verified_info.as_ref().unwrap().parsed_code.as_slice();
 
         self.ip = 0;
@@ -788,7 +784,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             Error::RustError(_) => return Err(error),
         };
 
-        let verified_info = method.verified_info.read();
+        let verified_info = method.verified_info.borrow();
         let exception_list = &verified_info.as_ref().unwrap().exceptions;
 
         // Use `coerce_to_object` so that we handle primitives correctly.
@@ -808,6 +804,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 }
 
                 if matches {
+                    #[cfg(feature = "avm_debug")]
+                    tracing::info!(target: "avm_caught", "Caught exception: {:?}", Error::AvmError(error));
+
                     self.clear_stack();
                     self.push_stack(error);
 
@@ -1176,7 +1175,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
         // The entire implementation of VTable assumes that
         // call_method is never encountered in user code. (see the long comment there)
-        // This was also the conlusion from analysing avmplus behavior - they
+        // This was also the conclusion from analysing avmplus behavior - they
         // unconditionally VerifyError upon noticing it.
 
         // However, the optimizer can still generate it.
@@ -1261,7 +1260,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let method = self.table_method(method, index, false)?;
         // TODO: What scope should the function be executed with?
         let scope = self.create_scopechain();
-        let function = FunctionObject::from_method(self, method, scope, None, None);
+        let function = FunctionObject::from_method(self, method, scope, None, None, None);
         let value = function.call(receiver, &args, self)?;
 
         self.push_stack(value);
@@ -1280,9 +1279,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .pop_stack()
             .coerce_to_object_or_typeerror(self, Some(&multiname))?;
 
-        let superclass_object = self.superclass_object(&multiname)?;
+        let bound_superclass_object = self.bound_superclass_object(&multiname);
 
-        let value = superclass_object.call_super(&multiname, receiver, &args, self)?;
+        let value = bound_superclass_object.call_super(&multiname, receiver, &args, self)?;
 
         self.push_stack(value);
 
@@ -1300,9 +1299,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .pop_stack()
             .coerce_to_object_or_typeerror(self, Some(&multiname))?;
 
-        let superclass_object = self.superclass_object(&multiname)?;
+        let bound_superclass_object = self.bound_superclass_object(&multiname);
 
-        superclass_object.call_super(&multiname, receiver, &args, self)?;
+        bound_superclass_object.call_super(&multiname, receiver, &args, self)?;
 
         Ok(FrameControl::Continue)
     }
@@ -1513,6 +1512,18 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         }
 
         // main path for dynamic names
+        if multiname.has_lazy_name() {
+            let name_value = self.context.avm2.peek(0);
+            if matches!(name_value, Value::Object(Object::XmlListObject(_))) {
+                // ECMA-357 11.3.1 The delete Operator
+                // If the type of the operand is XMLList, then a TypeError exception is thrown.
+                return Err(Error::AvmError(type_error(
+                    self,
+                    "Error #1119: Delete operator is not supported with operand of type XMLList.",
+                    1119,
+                )?));
+            }
+        }
         let multiname = multiname.fill_with_runtime_params(self)?;
         let object = self.pop_stack();
         let object = object.coerce_to_object_or_typeerror(self, Some(&multiname))?;
@@ -1532,9 +1543,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .pop_stack()
             .coerce_to_object_or_typeerror(self, Some(&multiname))?;
 
-        let superclass_object = self.superclass_object(&multiname)?;
+        let bound_superclass_object = self.bound_superclass_object(&multiname);
 
-        let value = superclass_object.get_super(&multiname, object, self)?;
+        let value = bound_superclass_object.get_super(&multiname, object, self)?;
 
         self.push_stack(value);
 
@@ -1551,9 +1562,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .pop_stack()
             .coerce_to_object_or_typeerror(self, Some(&multiname))?;
 
-        let superclass_object = self.superclass_object(&multiname)?;
+        let bound_superclass_object = self.bound_superclass_object(&multiname);
 
-        superclass_object.set_super(&multiname, value, object, self)?;
+        bound_superclass_object.set_super(&multiname, value, object, self)?;
 
         Ok(FrameControl::Continue)
     }
@@ -1585,7 +1596,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         index: Index<Exception>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let verified_info = method.verified_info.read();
+        let verified_info = method.verified_info.borrow();
         let exception_list = &verified_info.as_ref().unwrap().exceptions;
 
         let ex = &exception_list[index.0 as usize];
@@ -1663,7 +1674,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         avm_debug!(self.avm2(), "Resolving {:?}", *multiname);
         let (_, script) = self.domain().find_defining_script(self, &multiname)?;
-        let obj = script.globals(&mut self.context)?;
+        let obj = script.globals(self.context)?;
         self.push_stack(obj);
         Ok(FrameControl::Continue)
     }
@@ -1705,7 +1716,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         &mut self,
         script: Script<'gc>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let globals = script.globals(&mut self.context)?;
+        let globals = script.globals(self.context)?;
 
         self.push_stack(globals);
 
@@ -1741,7 +1752,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     fn op_get_slot(&mut self, index: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
         let object = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
-        let value = object.get_slot(index)?;
+        let value = object.get_slot(index);
 
         self.push_stack(value);
 
@@ -1761,7 +1772,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let value = self.pop_stack();
         let object = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
 
-        object.set_slot_no_coerce(index, value, self.context.gc_context)?;
+        object.set_slot_no_coerce(index, value, self.context.gc_context);
 
         Ok(FrameControl::Continue)
     }
@@ -1770,7 +1781,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let value = self
             .global_scope()
             .map(|global| global.get_slot(index))
-            .transpose()?
             .unwrap_or(Value::Undefined);
 
         self.push_stack(value);
@@ -2014,8 +2024,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_check_filter(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let xml = self.avm2().classes().xml.inner_class_definition();
-        let xml_list = self.avm2().classes().xml_list.inner_class_definition();
+        let xml = self.avm2().class_defs().xml;
+        let xml_list = self.avm2().class_defs().xml_list;
         let value = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
 
         if value.is_of_type(xml) || value.is_of_type(xml_list) {
@@ -2736,11 +2746,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             Value::Bool(_) => "boolean",
             Value::Number(_) | Value::Integer(_) => "number",
             Value::Object(o) => {
-                let classes = self.avm2().classes();
+                let classes = self.avm2().class_defs();
 
                 match o {
                     Object::FunctionObject(_) => {
-                        if o.instance_class() == classes.function.inner_class_definition() {
+                        if o.instance_class() == classes.function {
                             "function"
                         } else {
                             // Subclasses always have a typeof = "object"
@@ -2748,8 +2758,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                         }
                     }
                     Object::XmlObject(_) | Object::XmlListObject(_) => {
-                        if o.instance_class() == classes.xml_list.inner_class_definition()
-                            || o.instance_class() == classes.xml.inner_class_definition()
+                        if o.instance_class() == classes.xml_list
+                            || o.instance_class() == classes.xml
                         {
                             "xml"
                         } else {
@@ -2849,7 +2859,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         let dm = self.domain_memory();
         let mut dm = dm
-            .as_bytearray_mut(self.context.gc_context)
+            .as_bytearray_mut()
             .expect("Bytearray storage should exist");
 
         let Ok(address) = usize::try_from(address) else {
@@ -2872,7 +2882,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         let dm = self.domain_memory();
         let mut dm = dm
-            .as_bytearray_mut(self.context.gc_context)
+            .as_bytearray_mut()
             .expect("Bytearray storage should exist");
 
         let Ok(address) = usize::try_from(address) else {
@@ -2894,7 +2904,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         let dm = self.domain_memory();
         let mut dm = dm
-            .as_bytearray_mut(self.context.gc_context)
+            .as_bytearray_mut()
             .expect("Bytearray storage should exist");
 
         let Ok(address) = usize::try_from(address) else {
@@ -2916,7 +2926,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         let dm = self.domain_memory();
         let mut dm = dm
-            .as_bytearray_mut(self.context.gc_context)
+            .as_bytearray_mut()
             .expect("Bytearray storage should exist");
 
         let Ok(address) = usize::try_from(address) else {
@@ -2938,7 +2948,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         let dm = self.domain_memory();
         let mut dm = dm
-            .as_bytearray_mut(self.context.gc_context)
+            .as_bytearray_mut()
             .expect("Bytearray storage should exist");
 
         let Ok(address) = usize::try_from(address) else {

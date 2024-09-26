@@ -42,7 +42,7 @@ impl DomainListWindow {
     pub fn show_domain<'gc>(
         &mut self,
         ui: &mut Ui,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         domain: Domain<'gc>,
         messages: &mut Vec<Message>,
         search: &str,
@@ -63,7 +63,7 @@ impl DomainListWindow {
                     }
 
                     CollapsingHeader::new(format!("Class {class_name}"))
-                        .id_source(ui.id().with(class.0.as_ptr()))
+                        .id_salt(ui.id().with(class.0.as_ptr()))
                         .show(ui, |ui| {
                             for class_obj in &*class.class_objects() {
                                 let button = ui.button(format!("{class_obj:?}"));
@@ -87,7 +87,7 @@ impl DomainListWindow {
 
 pub fn open_domain_button<'gc>(
     ui: &mut Ui,
-    context: &mut UpdateContext<'_, 'gc>,
+    context: &mut UpdateContext<'gc>,
     messages: &mut Vec<Message>,
     domain: Domain<'gc>,
 ) {

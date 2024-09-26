@@ -1,11 +1,13 @@
 use crate::avm1::Avm1;
 use crate::avm1::Value;
+use crate::avm2::{Activation, Avm2, EventObject, TObject};
 use crate::context::{RenderContext, UpdateContext};
 pub use crate::display_object::{
     DisplayObject, TDisplayObject, TDisplayObjectContainer, TextSelection,
 };
 use crate::display_object::{EditText, InteractiveObject, TInteractiveObject};
 use crate::events::{ClipEvent, KeyCode};
+use crate::prelude::Avm2Value;
 use crate::Player;
 use either::Either;
 use gc_arena::barrier::unlock;
@@ -84,18 +86,63 @@ impl<'gc> FocusTracker<'gc> {
             .and_then(|o| o.as_edit_text())
     }
 
-    pub fn set(&self, new: Option<InteractiveObject<'gc>>, context: &mut UpdateContext<'_, 'gc>) {
+    /// Set the focus programmatically.
+    pub fn set(&self, new: Option<InteractiveObject<'gc>>, context: &mut UpdateContext<'gc>) {
         self.set_internal(new, context, false);
     }
 
-    pub fn reset_focus(&self, context: &mut UpdateContext<'_, 'gc>) {
+    /// Reset the focus programmatically.
+    pub fn reset_focus(&self, context: &mut UpdateContext<'gc>) {
         self.set_internal(None, context, true);
+    }
+
+    /// Set the focus and acknowledge that this change was caused by a pointer device.
+    pub fn set_by_mouse(
+        &self,
+        new: Option<InteractiveObject<'gc>>,
+        context: &mut UpdateContext<'gc>,
+    ) {
+        let old = self.0.focus.get();
+
+        // Mouse focus change events are not dispatched when the object is the same,
+        // contrary to key focus change events.
+        if InteractiveObject::option_ptr_eq(old, new) {
+            // Re-open the keyboard when the user clicked an already focused text field.
+            self.update_virtual_keyboard(context);
+            return;
+        }
+
+        if Self::dispatch_focus_change_event(context, "mouseFocusChange", old, new, None) {
+            return;
+        }
+
+        // When clicking an object that is not focusable by mouse,
+        // the real object will be used to dispatch focus change events,
+        // but `None` will be used when setting the focus.
+        let new = new.filter(|new| new.is_focusable_by_mouse(context));
+
+        self.set_internal(new, context, false);
+    }
+
+    /// Set the focus and acknowledge that this change was caused by a key.
+    pub fn set_by_key(
+        &self,
+        new: Option<InteractiveObject<'gc>>,
+        key_code: KeyCode,
+        context: &mut UpdateContext<'gc>,
+    ) {
+        let old = self.0.focus.get();
+        if Self::dispatch_focus_change_event(context, "keyFocusChange", old, new, Some(key_code)) {
+            return;
+        }
+
+        self.set_internal(new, context, true);
     }
 
     fn set_internal(
         &self,
         new: Option<InteractiveObject<'gc>>,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         run_actions: bool,
     ) {
         Self::roll_over(context, new);
@@ -150,25 +197,62 @@ impl<'gc> FocusTracker<'gc> {
 
         // This applies even if the focused element hasn't changed.
         if let Some(text_field) = self.get_as_edit_text() {
-            if text_field.is_editable() {
-                if !text_field.movie().is_action_script_3() {
-                    let length = text_field.text_length();
-                    text_field
-                        .set_selection(Some(TextSelection::for_range(0, length)), context.gc());
-                }
-                context.ui.open_virtual_keyboard();
+            if text_field.is_editable() && !text_field.movie().is_action_script_3() {
+                // TODO This logic is inaccurate and addresses
+                //   only setting the focus programmatically.
+                let length = text_field.text_length();
+                text_field.set_selection(Some(TextSelection::for_range(0, length)), context.gc());
             }
+        }
+
+        self.update_virtual_keyboard(context);
+    }
+
+    fn update_virtual_keyboard(&self, context: &mut UpdateContext<'gc>) {
+        if let Some(text_field) = self.get_as_edit_text() {
+            if text_field.is_editable() {
+                context.ui.open_virtual_keyboard();
+            } else {
+                context.ui.close_virtual_keyboard();
+            }
+        } else {
+            context.ui.close_virtual_keyboard();
         }
     }
 
-    fn roll_over(context: &mut UpdateContext<'_, 'gc>, new: Option<InteractiveObject<'gc>>) {
+    /// Dispatches the AVM2's focus change event.
+    ///
+    /// Returns `true` if the focus change operation should be canceled.
+    fn dispatch_focus_change_event(
+        context: &mut UpdateContext<'gc>,
+        event_type: &'static str,
+        target: Option<InteractiveObject<'gc>>,
+        related_object: Option<InteractiveObject<'gc>>,
+        key_code: Option<KeyCode>,
+    ) -> bool {
+        let target = target
+            .map(|int| int.as_displayobject())
+            .unwrap_or_else(|| context.stage.as_displayobject())
+            .object2();
+        let Avm2Value::Object(target) = target else {
+            return false;
+        };
+
+        let mut activation = Activation::from_nothing(context);
+        let key_code = key_code.map(|k| k.value()).unwrap_or_default();
+        let event =
+            EventObject::focus_event(&mut activation, event_type, true, related_object, key_code);
+        Avm2::dispatch_event(activation.context, event, target);
+
+        let canceled = event.as_event().unwrap().is_cancelled();
+        canceled
+    }
+
+    fn roll_over(context: &mut UpdateContext<'gc>, new: Option<InteractiveObject<'gc>>) {
         let old = context.mouse_data.hovered;
 
-        // TODO It seems that AVM2 has a slightly different behavior here.
-        //   It may be related to the fact that AVM2 handles key and mouse focus differently.
-        //   AVM2 is being bypassed here conditionally until
-        //   a proper support for AVM2 events is implemented.
-        //   See https://github.com/ruffle-rs/ruffle/issues/16789
+        // AVM2 does not dispatch roll out/over events here and does not update hovered object.
+        // TODO Analyze how this should behave in mixed AVM content.
         if new.is_some_and(|int| int.as_displayobject().movie().is_action_script_3())
             || old.is_some_and(|int| int.as_displayobject().movie().is_action_script_3())
         {
@@ -184,13 +268,13 @@ impl<'gc> FocusTracker<'gc> {
         }
     }
 
-    pub fn tab_order(&self, context: &mut UpdateContext<'_, 'gc>) -> TabOrder<'gc> {
+    pub fn tab_order(&self, context: &mut UpdateContext<'gc>) -> TabOrder<'gc> {
         let mut tab_order = TabOrder::fill(context);
         tab_order.sort();
         tab_order
     }
 
-    pub fn cycle(&self, context: &mut UpdateContext<'_, 'gc>, reverse: bool) {
+    pub fn cycle(&self, context: &mut UpdateContext<'gc>, reverse: bool) {
         // Ordering the whole array and finding the next object in it
         // is suboptimal, but it's a simple and infrequently performed operation.
         // Additionally, we want to display the whole list in the debug UI anyway,
@@ -216,12 +300,12 @@ impl<'gc> FocusTracker<'gc> {
         };
 
         if next.is_some() {
-            self.set_internal(next.copied(), context, true);
+            self.set_by_key(next.copied(), KeyCode::TAB, context);
             self.update_highlight(context);
         }
     }
 
-    pub fn navigate(&self, context: &mut UpdateContext<'_, 'gc>, direction: NavigationDirection) {
+    pub fn navigate(&self, context: &mut UpdateContext<'gc>, direction: NavigationDirection) {
         let Some(focus) = self.get() else {
             return;
         };
@@ -229,15 +313,15 @@ impl<'gc> FocusTracker<'gc> {
         let tab_order = TabOrder::fill(context);
         let ordering = NavigationOrdering::new(focus, direction);
         if let Some(next) = tab_order.first(ordering) {
-            self.set_internal(Some(next), context, true);
+            self.set_by_key(Some(next), direction.key(), context);
         }
     }
 
-    pub fn update_highlight(&self, context: &mut UpdateContext<'_, 'gc>) {
+    pub fn update_highlight(&self, context: &mut UpdateContext<'gc>) {
         self.0.highlight.replace(self.calculate_highlight(context));
     }
 
-    fn calculate_highlight(&self, context: &mut UpdateContext<'_, 'gc>) -> Highlight {
+    fn calculate_highlight(&self, context: &mut UpdateContext<'gc>) -> Highlight {
         let Some(focus) = self.get() else {
             return Highlight::Inactive;
         };
@@ -303,7 +387,7 @@ impl<'gc> TabOrder<'gc> {
         }
     }
 
-    fn fill(context: &mut UpdateContext<'_, 'gc>) -> Self {
+    fn fill(context: &mut UpdateContext<'gc>) -> Self {
         let stage = context.stage;
         let mut tab_order = Self::empty();
         stage.fill_tab_order(&mut tab_order, context);
@@ -444,12 +528,21 @@ pub enum NavigationDirection {
 impl NavigationDirection {
     pub fn from_key_code(key_code: KeyCode) -> Option<Self> {
         Some(match key_code {
-            KeyCode::Up => Self::Up,
-            KeyCode::Right => Self::Right,
-            KeyCode::Down => Self::Down,
-            KeyCode::Left => Self::Left,
+            KeyCode::UP => Self::Up,
+            KeyCode::RIGHT => Self::Right,
+            KeyCode::DOWN => Self::Down,
+            KeyCode::LEFT => Self::Left,
             _ => return None,
         })
+    }
+
+    fn key(self) -> KeyCode {
+        match self {
+            Self::Up => KeyCode::UP,
+            Self::Right => KeyCode::RIGHT,
+            Self::Down => KeyCode::DOWN,
+            Self::Left => KeyCode::LEFT,
+        }
     }
 }
 

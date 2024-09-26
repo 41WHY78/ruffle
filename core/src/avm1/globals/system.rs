@@ -39,26 +39,6 @@ impl fmt::Display for CpuArchitecture {
     }
 }
 
-/// Available type of sandbox for a given SWF
-#[allow(dead_code)]
-pub enum SandboxType {
-    Remote,
-    LocalWithFile,
-    LocalWithNetwork,
-    LocalTrusted,
-}
-
-impl fmt::Display for SandboxType {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt.write_str(match self {
-            SandboxType::Remote => "remote",
-            SandboxType::LocalWithFile => "localWithFile",
-            SandboxType::LocalWithNetwork => "localWithNetwork",
-            SandboxType::LocalTrusted => "localTrusted",
-        })
-    }
-}
-
 /// The available host operating systems
 #[allow(dead_code)]
 pub enum OperatingSystem {
@@ -284,16 +264,20 @@ pub struct SystemProperties {
     pub manufacturer: Manufacturer,
     /// The os of the host
     pub os: OperatingSystem,
-    /// The type of the player sandbox
-    pub sandbox_type: SandboxType,
     /// The cpu architecture of the platform
     pub cpu_architecture: CpuArchitecture,
     /// The highest supported h264 decoder level
     pub idc_level: String,
 }
 
+impl Default for SystemProperties {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SystemProperties {
-    pub fn new(sandbox_type: SandboxType) -> Self {
+    pub fn new() -> Self {
         SystemProperties {
             //TODO: default to true on fp>=7, false <= 6
             exact_settings: true,
@@ -310,7 +294,6 @@ impl SystemProperties {
             dpi: 72_f32,
             manufacturer: Manufacturer::Linux,
             os: OperatingSystem::Linux,
-            sandbox_type,
             cpu_architecture: CpuArchitecture::X86,
             idc_level: "5.1".into(),
         }

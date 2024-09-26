@@ -10,6 +10,7 @@ use crate::avm2::vtable::VTable;
 
 use gc_arena::Gc;
 use std::collections::HashMap;
+use swf::avm2::types::MethodBody;
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,14 +93,14 @@ impl<'gc> OptValue<'gc> {
             return true;
         }
 
-        let classes = activation.avm2().classes();
+        let class_defs = activation.avm2().class_defs();
 
         // Primitives are always not-null
-        self.class == Some(classes.int.inner_class_definition())
-            || self.class == Some(classes.uint.inner_class_definition())
-            || self.class == Some(classes.number.inner_class_definition())
-            || self.class == Some(classes.boolean.inner_class_definition())
-            || self.class == Some(classes.void_def)
+        self.class == Some(class_defs.int)
+            || self.class == Some(class_defs.uint)
+            || self.class == Some(class_defs.number)
+            || self.class == Some(class_defs.boolean)
+            || self.class == Some(class_defs.void)
     }
 
     pub fn merged_with(self, other: OptValue<'gc>) -> OptValue<'gc> {
@@ -223,9 +224,90 @@ impl<'gc> Stack<'gc> {
     }
 }
 
+/// Checks if the method fits the following pattern:
+///
+/// ```text
+/// [Debug/DebugFile/DebugLine] zero or more times
+/// GetLocal { index: 0 }
+/// [Debug/DebugFile/DebugLine] zero or more times
+/// PushScope
+/// ...
+/// ```
+///
+/// along with the following conditions:
+/// * No jumps to that initial PushScope opcode, or anything before it
+/// * No additional scope-related opcodes (PushScope, PushWith, PopScope)
+/// * No catch blocks (MethodBody.exceptions is empty)
+///
+/// If all of these conditions are fulfilled, then the optimizer will predict the type of
+/// `FindPropStrict/FindProperty` opcodes.
+fn has_simple_scope_structure(
+    code: &[Op],
+    jump_targets: &HashMap<i32, Vec<JumpSource>>,
+    method_body: &MethodBody,
+) -> bool {
+    if !method_body.exceptions.is_empty() {
+        return false;
+    }
+
+    let mut getlocal0_pos = None;
+    for (i, op) in code.iter().enumerate() {
+        match op {
+            // Ignore any initial debug opcodes
+            Op::Debug { .. } | Op::DebugFile { .. } | Op::DebugLine { .. } => {}
+            // Look for an initial getlocal0
+            Op::GetLocal { index: 0 } => {
+                getlocal0_pos = Some(i);
+                break;
+            }
+            // Anything else doesn't fit the pattern, so give up
+            _ => return false,
+        }
+    }
+    // Give up if we didn't find it
+    let Some(getlocal0_pos) = getlocal0_pos else {
+        return false;
+    };
+
+    let mut pushscope_pos = None;
+    for (i, op) in code.iter().enumerate().skip(getlocal0_pos + 1) {
+        match op {
+            // Ignore any debug opcodes
+            Op::Debug { .. } | Op::DebugFile { .. } | Op::DebugLine { .. } => {}
+            // Look for a pushscope
+            Op::PushScope => {
+                pushscope_pos = Some(i);
+                break;
+            }
+            // Anything else doesn't fit the pattern, so give up
+            _ => return false,
+        }
+    }
+    // Give up if we didn't find it
+    let Some(pushscope_pos) = pushscope_pos else {
+        return false;
+    };
+
+    for i in 0..=pushscope_pos {
+        if jump_targets.contains_key(&(i as i32)) {
+            return false;
+        }
+    }
+
+    for op in &code[pushscope_pos + 1..] {
+        match op {
+            Op::PushScope | Op::PushWith | Op::PopScope => {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 pub fn optimize<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    method: &BytecodeMethod<'gc>,
+    method: Gc<'gc, BytecodeMethod<'gc>>,
     code: &mut Vec<Op<'gc>>,
     resolved_parameters: &[ResolvedParamConfig<'gc>],
     return_type: Option<Class<'gc>>,
@@ -250,24 +332,16 @@ pub fn optimize<'gc>(
         pub namespace: Class<'gc>,
     }
     let types = Types {
-        object: activation.avm2().classes().object.inner_class_definition(),
-        int: activation.avm2().classes().int.inner_class_definition(),
-        uint: activation.avm2().classes().uint.inner_class_definition(),
-        number: activation.avm2().classes().number.inner_class_definition(),
-        boolean: activation.avm2().classes().boolean.inner_class_definition(),
-        string: activation.avm2().classes().string.inner_class_definition(),
-        array: activation.avm2().classes().array.inner_class_definition(),
-        function: activation
-            .avm2()
-            .classes()
-            .function
-            .inner_class_definition(),
-        void: activation.avm2().classes().void_def,
-        namespace: activation
-            .avm2()
-            .classes()
-            .namespace
-            .inner_class_definition(),
+        object: activation.avm2().class_defs().object,
+        int: activation.avm2().class_defs().int,
+        uint: activation.avm2().class_defs().uint,
+        number: activation.avm2().class_defs().number,
+        boolean: activation.avm2().class_defs().boolean,
+        string: activation.avm2().class_defs().string,
+        array: activation.avm2().class_defs().array,
+        function: activation.avm2().class_defs().function,
+        void: activation.avm2().class_defs().void,
+        namespace: activation.avm2().class_defs().namespace,
     };
 
     let method_body = method
@@ -278,20 +352,9 @@ pub fn optimize<'gc>(
     // but this works since it's guaranteed to be set in `Activation::from_method`.
     let this_value = activation.local_register(0);
 
-    let this_class = if let Some(this_class) = activation.subclass_object() {
-        if this_value.is_of_type(activation, this_class.inner_class_definition()) {
-            Some(this_class.inner_class_definition())
-        } else if let Some(this_object) = this_value.as_object() {
-            if this_object
-                .as_class_object()
-                .map(|c| c.inner_class_definition() == this_class.inner_class_definition())
-                .unwrap_or(false)
-            {
-                // Static method
-                Some(this_object.instance_class())
-            } else {
-                None
-            }
+    let this_class = if let Some(this_class) = activation.bound_class() {
+        if this_value.is_of_type(activation, this_class) {
+            Some(this_class)
         } else {
             None
         }
@@ -348,26 +411,7 @@ pub fn optimize<'gc>(
         }
     }
 
-    let mut has_simple_scoping = false;
-    if !jump_targets.contains_key(&0) && !jump_targets.contains_key(&1) {
-        if matches!(code.get(0), Some(Op::GetLocal { index: 0 }))
-            && matches!(code.get(1), Some(Op::PushScope))
-        {
-            has_simple_scoping = true;
-            for op in code.iter().skip(2) {
-                match op {
-                    Op::PushScope | Op::PushWith | Op::PopScope => {
-                        has_simple_scoping = false;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    if !method_body.exceptions.is_empty() {
-        has_simple_scoping = false;
-    }
+    let has_simple_scoping = has_simple_scope_structure(code, &jump_targets, method_body);
 
     // TODO: Fill out all ops, then add scope stack and stack merging, too
     let mut state_map: HashMap<i32, Locals<'gc>> = HashMap::new();

@@ -37,7 +37,7 @@ use wasm_bindgen::convert::FromWasmAbi;
 use wasm_bindgen::prelude::*;
 use web_sys::{
     AddEventListenerOptions, ClipboardEvent, Element, Event, EventTarget, FocusEvent,
-    HtmlCanvasElement, HtmlElement, KeyboardEvent, PointerEvent, WheelEvent, Window,
+    HtmlCanvasElement, HtmlElement, KeyboardEvent, Node, PointerEvent, WheelEvent, Window,
 };
 
 static RUFFLE_GLOBAL_PANIC: Once = Once::new();
@@ -56,7 +56,7 @@ thread_local! {
     /// issues with lifetimes and type parameters (which cannot be exported with wasm-bindgen).
     static INSTANCES: RefCell<SlotMap<RuffleHandle, RefCell<RuffleInstance>>> = RefCell::new(SlotMap::with_key());
 
-    static CURRENT_CONTEXT: RefCell<Option<*mut UpdateContext<'static, 'static>>> = const { RefCell::new(None) };
+    static CURRENT_CONTEXT: RefCell<Option<*mut UpdateContext<'static>>> = const { RefCell::new(None) };
 }
 
 type AnimationHandler = Closure<dyn FnMut(f64)>;
@@ -78,13 +78,14 @@ impl<E: FromWasmAbi + 'static> JsCallback<E> {
         let target = target.as_ref();
         let closure = Closure::new(closure);
 
+        let options = AddEventListenerOptions::new();
+        options.set_passive(false);
+        options.set_capture(is_capture);
         target
             .add_event_listener_with_callback_and_add_event_listener_options(
                 name,
                 closure.as_ref().unchecked_ref(),
-                AddEventListenerOptions::new()
-                    .passive(false)
-                    .capture(is_capture),
+                &options,
             )
             .warn_on_error();
 
@@ -139,9 +140,8 @@ struct RuffleInstance {
     log_subscriber: Arc<Layered<WASMLayer, Registry>>,
 }
 
-#[wasm_bindgen(raw_module = "./ruffle-player")]
+#[wasm_bindgen(raw_module = "./internal/player/inner")]
 extern "C" {
-    #[wasm_bindgen(extends = EventTarget)]
     #[derive(Clone)]
     pub type JavascriptPlayer;
 
@@ -174,6 +174,9 @@ extern "C" {
 
     #[wasm_bindgen(method, js_name = "openVirtualKeyboard")]
     fn open_virtual_keyboard(this: &JavascriptPlayer);
+
+    #[wasm_bindgen(method, js_name = "closeVirtualKeyboard")]
+    fn close_virtual_keyboard(this: &JavascriptPlayer);
 
     #[wasm_bindgen(method, js_name = "isVirtualKeyboardFocused")]
     fn is_virtual_keyboard_focused(this: &JavascriptPlayer) -> bool;
@@ -289,6 +292,11 @@ impl RuffleHandle {
         self.with_core(|core| core.is_playing()).unwrap_or_default()
     }
 
+    pub fn has_focus(&self) -> bool {
+        self.with_instance(|instance| instance.has_focus)
+            .unwrap_or_default()
+    }
+
     pub fn volume(&self) -> f32 {
         self.with_core(|core| core.volume()).unwrap_or_default()
     }
@@ -347,11 +355,14 @@ impl RuffleHandle {
 
     async fn run_context_menu_callback_paste(&self, index: usize) {
         let window = web_sys::window().expect("Missing window");
-        let Some(clipboard) = window.navigator().clipboard() else {
+        let navigator = window.navigator();
+        // The Clipboard API is unavailable on e.g. non-secure pages.
+        if !JsValue::from_str("clipboard").js_in(&navigator) {
             tracing::warn!("Clipboard unsupported");
             let _ = self.with_instance(|inst| inst.js_player.display_clipboard_modal(false));
             return;
-        };
+        }
+        let clipboard = window.navigator().clipboard();
 
         let promise = clipboard.read_text();
         tracing::debug!("Requested text from clipboard");
@@ -501,6 +512,8 @@ impl RuffleHandle {
 
         // Register the instance and create the animation frame closure.
         let mut ruffle = Self::add_instance(instance)?;
+
+        Self::set_up_focus_management(ruffle, parent)?;
 
         // Create the animation frame closure.
         ruffle.with_instance_mut(|instance| {
@@ -757,12 +770,34 @@ impl RuffleHandle {
                         core.flush_shared_objects();
                     });
                 }));
+        })?;
 
+        // Set initial timestamp and do initial tick to start animation loop.
+        ruffle.tick(0.0);
+
+        Ok(ruffle)
+    }
+
+    fn set_up_focus_management(
+        ruffle: RuffleHandle,
+        focus_target: HtmlElement,
+    ) -> Result<(), RuffleInstanceError> {
+        focus_target.set_tab_index(-1);
+        ruffle.with_instance_mut(|instance| {
+            let focus_target_clone = focus_target.clone();
             instance.focusin_callback = Some(JsCallback::register(
-                &player.canvas,
+                &focus_target,
                 "focusin",
                 false,
-                move |_js_event: FocusEvent| {
+                move |js_event: FocusEvent| {
+                    if let Some(related_target) = js_event.related_target() {
+                        let related_target = related_target.dyn_ref::<Node>();
+                        if focus_target_clone.contains(related_target) {
+                            // Focus is changed within parent, we can ignore it.
+                            return;
+                        }
+                    }
+
                     let _ = ruffle.with_instance_mut(|instance| {
                         if !instance.has_focus {
                             instance.has_focus = true;
@@ -774,11 +809,20 @@ impl RuffleHandle {
                 },
             ));
 
+            let focus_target_clone = focus_target.clone();
             instance.focusout_callback = Some(JsCallback::register(
-                &player.canvas,
+                &focus_target,
                 "focusout",
                 false,
-                move |_js_event: FocusEvent| {
+                move |js_event: FocusEvent| {
+                    if let Some(related_target) = js_event.related_target() {
+                        let related_target = related_target.dyn_ref::<Node>();
+                        if focus_target_clone.contains(related_target) {
+                            // Focus is changed within parent, we can ignore it.
+                            return;
+                        }
+                    }
+
                     let _ = ruffle.with_instance_mut(|instance| {
                         if instance.has_focus {
                             let _ = instance.with_core_mut(|core| {
@@ -790,21 +834,26 @@ impl RuffleHandle {
                 },
             ));
 
-            let canvas = player.canvas.clone();
+            let focus_target_clone = focus_target.clone();
             instance.focus_on_press_callback = Some(JsCallback::register(
-                &player.canvas,
+                &focus_target,
                 "pointerdown",
-                false,
+                // We want to set the focus as early as we can.
+                true,
                 move |_js_event| {
-                    canvas.focus().warn_on_error();
+                    let has_focus = ruffle
+                        .with_instance(|instance| instance.has_focus)
+                        .unwrap_or_default();
+                    if has_focus {
+                        // We already have focus, no need to reset it.
+                        return;
+                    }
+
+                    focus_target_clone.focus().warn_on_error();
                 },
             ));
         })?;
-
-        // Set initial timestamp and do initial tick to start animation loop.
-        ruffle.tick(0.0);
-
-        Ok(ruffle)
+        Ok(())
     }
 
     /// Registers a new Ruffle instance and returns the handle to the instance.

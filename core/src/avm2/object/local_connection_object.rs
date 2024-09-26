@@ -9,8 +9,8 @@ use crate::local_connection::{LocalConnectionHandle, LocalConnections};
 use crate::string::AvmString;
 use core::fmt;
 use flash_lso::types::Value as AmfValue;
-use gc_arena::{Collect, GcCell, GcWeakCell, Mutation};
-use std::cell::{Ref, RefMut};
+use gc_arena::{Collect, Gc, GcWeak, Mutation};
+use std::cell::RefCell;
 
 /// A class instance allocator that allocates LocalConnection objects.
 pub fn local_connection_allocator<'gc>(
@@ -19,11 +19,11 @@ pub fn local_connection_allocator<'gc>(
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
-    Ok(LocalConnectionObject(GcCell::new(
+    Ok(LocalConnectionObject(Gc::new(
         activation.context.gc_context,
         LocalConnectionObjectData {
             base,
-            connection_handle: None,
+            connection_handle: RefCell::new(None),
         },
     ))
     .into())
@@ -31,33 +31,38 @@ pub fn local_connection_allocator<'gc>(
 
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
-pub struct LocalConnectionObject<'gc>(pub GcCell<'gc, LocalConnectionObjectData<'gc>>);
+pub struct LocalConnectionObject<'gc>(pub Gc<'gc, LocalConnectionObjectData<'gc>>);
 
 #[derive(Clone, Collect, Copy, Debug)]
 #[collect(no_drop)]
-pub struct LocalConnectionObjectWeak<'gc>(pub GcWeakCell<'gc, LocalConnectionObjectData<'gc>>);
+pub struct LocalConnectionObjectWeak<'gc>(pub GcWeak<'gc, LocalConnectionObjectData<'gc>>);
 
 impl fmt::Debug for LocalConnectionObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LocalConnectionObject")
-            .field("ptr", &self.0.as_ptr())
+            .field("ptr", &Gc::as_ptr(self.0))
             .finish()
     }
 }
 
 #[derive(Collect)]
 #[collect(no_drop)]
+#[repr(C, align(8))]
 pub struct LocalConnectionObjectData<'gc> {
     /// Base script object
     base: ScriptObjectData<'gc>,
 
-    #[collect(require_static)]
-    connection_handle: Option<LocalConnectionHandle>,
+    connection_handle: RefCell<Option<LocalConnectionHandle>>,
 }
+
+const _: () = assert!(std::mem::offset_of!(LocalConnectionObjectData, base) == 0);
+const _: () = assert!(
+    std::mem::align_of::<LocalConnectionObjectData>() == std::mem::align_of::<ScriptObjectData>()
+);
 
 impl<'gc> LocalConnectionObject<'gc> {
     pub fn is_connected(&self) -> bool {
-        self.0.read().connection_handle.is_some()
+        self.0.connection_handle.borrow().is_some()
     }
 
     pub fn connect(&self, activation: &mut Activation<'_, 'gc>, name: AvmString<'gc>) -> bool {
@@ -71,25 +76,20 @@ impl<'gc> LocalConnectionObject<'gc> {
             &name,
         );
         let result = connection_handle.is_some();
-        self.0
-            .write(activation.context.gc_context)
-            .connection_handle = connection_handle;
+
+        *self.0.connection_handle.borrow_mut() = connection_handle;
+
         result
     }
 
     pub fn disconnect(&self, activation: &mut Activation<'_, 'gc>) {
-        if let Some(conn_handle) = self
-            .0
-            .write(activation.context.gc_context)
-            .connection_handle
-            .take()
-        {
+        if let Some(conn_handle) = self.0.connection_handle.borrow_mut().take() {
             activation.context.local_connections.close(conn_handle);
         }
     }
 
-    pub fn send_status(&self, context: &mut UpdateContext<'_, 'gc>, status: &'static str) {
-        let mut activation = Activation::from_nothing(context.reborrow());
+    pub fn send_status(&self, context: &mut UpdateContext<'gc>, status: &'static str) {
+        let mut activation = Activation::from_nothing(context);
         if let Ok(event) = activation.avm2().classes().statusevent.construct(
             &mut activation,
             &[
@@ -100,18 +100,18 @@ impl<'gc> LocalConnectionObject<'gc> {
                 status.into(),
             ],
         ) {
-            Avm2::dispatch_event(&mut activation.context, event, (*self).into());
+            Avm2::dispatch_event(activation.context, event, (*self).into());
         }
     }
 
     pub fn run_method(
         &self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         domain: Domain<'gc>,
         method_name: AvmString<'gc>,
         amf_arguments: Vec<AmfValue>,
     ) {
-        let mut activation = Activation::from_domain(context.reborrow(), domain);
+        let mut activation = Activation::from_domain(context, domain);
         let mut arguments = Vec::with_capacity(amf_arguments.len());
 
         for argument in amf_arguments {
@@ -136,7 +136,7 @@ impl<'gc> LocalConnectionObject<'gc> {
                                 error,
                             ],
                         ) {
-                            Avm2::dispatch_event(&mut activation.context, event, (*self).into());
+                            Avm2::dispatch_event(activation.context, event, (*self).into());
                         }
                     }
                     _ => {
@@ -149,16 +149,16 @@ impl<'gc> LocalConnectionObject<'gc> {
 }
 
 impl<'gc> TObject<'gc> for LocalConnectionObject<'gc> {
-    fn base(&self) -> Ref<ScriptObjectData<'gc>> {
-        Ref::map(self.0.read(), |read| &read.base)
-    }
+    fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
+        // SAFETY: Object data is repr(C), and a compile-time assert ensures
+        // that the ScriptObjectData stays at offset 0 of the struct- so the
+        // layouts are compatible
 
-    fn base_mut(&self, mc: &Mutation<'gc>) -> RefMut<ScriptObjectData<'gc>> {
-        RefMut::map(self.0.write(mc), |write| &mut write.base)
+        unsafe { Gc::cast(self.0) }
     }
 
     fn as_ptr(&self) -> *const ObjectPtr {
-        self.0.as_ptr() as *const ObjectPtr
+        Gc::as_ptr(self.0) as *const ObjectPtr
     }
 
     fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {

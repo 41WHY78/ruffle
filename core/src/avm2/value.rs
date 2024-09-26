@@ -13,7 +13,6 @@ use crate::string::{AvmAtom, AvmString, WStr};
 use gc_arena::{Collect, Mutation};
 use num_bigint::BigInt;
 use num_traits::{ToPrimitive, Zero};
-use std::cell::Ref;
 use std::mem::size_of;
 use swf::avm2::types::{DefaultValue as AbcDefaultValue, Index};
 
@@ -535,14 +534,14 @@ pub fn abc_default_value<'gc>(
         | AbcDefaultValue::Explicit(ns)
         | AbcDefaultValue::StaticProtected(ns)
         | AbcDefaultValue::Private(ns) => {
-            let ns = translation_unit.pool_namespace(*ns, &mut activation.context)?;
+            let ns = translation_unit.pool_namespace(activation, *ns)?;
             NamespaceObject::from_namespace(activation, ns).map(Into::into)
         }
     }
 }
 
 impl<'gc> Value<'gc> {
-    pub fn as_namespace(&self) -> Result<Ref<Namespace<'gc>>, Error<'gc>> {
+    pub fn as_namespace(&self) -> Result<Namespace<'gc>, Error<'gc>> {
         match self {
             Value::Object(ns) => ns
                 .as_namespace()
@@ -657,21 +656,14 @@ impl<'gc> Value<'gc> {
         match self {
             Value::Object(Object::PrimitiveObject(o)) => o.value_of(activation.context.gc_context),
             Value::Object(o) if hint == Hint::String => {
-                let mut prim = *self;
                 let object = *o;
 
-                if let Value::Object(_) = object.get_public_property("toString", activation)? {
-                    prim = object.call_public_property("toString", &[], activation)?;
-                }
-
+                let prim = object.call_public_property("toString", &[], activation)?;
                 if prim.is_primitive() {
                     return Ok(prim);
                 }
 
-                if let Value::Object(_) = object.get_public_property("valueOf", activation)? {
-                    prim = object.call_public_property("valueOf", &[], activation)?;
-                }
-
+                let prim = object.call_public_property("valueOf", &[], activation)?;
                 if prim.is_primitive() {
                     return Ok(prim);
                 }
@@ -686,21 +678,14 @@ impl<'gc> Value<'gc> {
                 )?))
             }
             Value::Object(o) if hint == Hint::Number => {
-                let mut prim = *self;
                 let object = *o;
 
-                if let Value::Object(_) = object.get_public_property("valueOf", activation)? {
-                    prim = object.call_public_property("valueOf", &[], activation)?;
-                }
-
+                let prim = object.call_public_property("valueOf", &[], activation)?;
                 if prim.is_primitive() {
                     return Ok(prim);
                 }
 
-                if let Value::Object(_) = object.get_public_property("toString", activation)? {
-                    prim = object.call_public_property("toString", &[], activation)?;
-                }
-
+                let prim = object.call_public_property("toString", &[], activation)?;
                 if prim.is_primitive() {
                     return Ok(prim);
                 }
@@ -1005,30 +990,30 @@ impl<'gc> Value<'gc> {
         activation: &mut Activation<'_, 'gc>,
         class: Class<'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        if class == activation.avm2().classes().int.inner_class_definition() {
+        if class == activation.avm2().class_defs().int {
             return Ok(self.coerce_to_i32(activation)?.into());
         }
 
-        if class == activation.avm2().classes().uint.inner_class_definition() {
+        if class == activation.avm2().class_defs().uint {
             return Ok(self.coerce_to_u32(activation)?.into());
         }
 
-        if class == activation.avm2().classes().number.inner_class_definition() {
+        if class == activation.avm2().class_defs().number {
             return Ok(self.coerce_to_number(activation)?.into());
         }
 
-        if class == activation.avm2().classes().boolean.inner_class_definition() {
+        if class == activation.avm2().class_defs().boolean {
             return Ok(self.coerce_to_boolean().into());
         }
 
         if matches!(self, Value::Undefined) || matches!(self, Value::Null) {
-            if class == activation.avm2().classes().void_def {
+            if class == activation.avm2().class_defs().void {
                 return Ok(Value::Undefined);
             }
             return Ok(Value::Null);
         }
 
-        if class == activation.avm2().classes().string.inner_class_definition() {
+        if class == activation.avm2().class_defs().string {
             return Ok(self.coerce_to_string(activation)?.into());
         }
 
@@ -1108,18 +1093,18 @@ impl<'gc> Value<'gc> {
         activation: &mut Activation<'_, 'gc>,
         type_object: Class<'gc>,
     ) -> bool {
-        if type_object == activation.avm2().classes().number.inner_class_definition() {
+        if type_object == activation.avm2().class_defs().number {
             return self.is_number();
         }
-        if type_object == activation.avm2().classes().uint.inner_class_definition() {
+        if type_object == activation.avm2().class_defs().uint {
             return self.is_u32();
         }
-        if type_object == activation.avm2().classes().int.inner_class_definition() {
+        if type_object == activation.avm2().class_defs().int {
             return self.is_i32();
         }
 
         if let Value::Undefined = self {
-            if type_object == activation.avm2().classes().void_def {
+            if type_object == activation.avm2().class_defs().void {
                 return true;
             }
         }
@@ -1139,7 +1124,7 @@ impl<'gc> Value<'gc> {
             // TODO - this should apply to (Array/Vector).indexOf, and possibility more places as well
             if let Some(xml1) = self.as_object().and_then(|obj| obj.as_xml_object()) {
                 if let Some(xml2) = other.as_object().and_then(|obj| obj.as_xml_object()) {
-                    return E4XNode::ptr_eq(*xml1.node(), *xml2.node());
+                    return E4XNode::ptr_eq(xml1.node(), xml2.node());
                 }
             }
             false

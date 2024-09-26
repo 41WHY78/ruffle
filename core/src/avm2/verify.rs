@@ -66,7 +66,7 @@ pub enum JumpSource {
 
 pub fn verify_method<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    method: &BytecodeMethod<'gc>,
+    method: Gc<'gc, BytecodeMethod<'gc>>,
 ) -> Result<VerifiedMethodInfo<'gc>, Error<'gc>> {
     let body = method
         .body()
@@ -98,7 +98,9 @@ pub fn verify_method<'gc>(
     }
 
     let resolved_param_config = resolve_param_config(activation, method.signature())?;
-    let resolved_return_type = resolve_return_type(activation, &method.return_type)?;
+    let resolved_return_type = resolve_return_type(activation, method.return_type)?;
+
+    let mut seen_exception_indices = HashSet::new();
 
     let mut worklist = vec![0];
 
@@ -131,16 +133,21 @@ pub fn verify_method<'gc>(
                 Err(_) => unreachable!(),
             };
 
-            for exception in body.exceptions.iter() {
+            for (exception_index, exception) in body.exceptions.iter().enumerate() {
                 // If this op is in the to..from and it can throw an error,
                 // add the exception's target to the worklist.
                 if exception.from_offset as i32 <= previous_position
                     && previous_position < exception.to_offset as i32
                     && op_can_throw_error(&op)
-                    && !seen_targets.contains(&(exception.target_offset as i32))
                 {
-                    worklist.push(exception.target_offset);
-                    seen_targets.insert(exception.target_offset as i32);
+                    if !seen_targets.contains(&(exception.target_offset as i32)) {
+                        worklist.push(exception.target_offset);
+                        seen_targets.insert(exception.target_offset as i32);
+                    }
+
+                    // Keep track of all the valid exceptions, and only verify
+                    // them- this is more lenient than avmplus, but still safe.
+                    seen_exception_indices.insert(exception_index);
                 }
             }
 
@@ -307,7 +314,7 @@ pub fn verify_method<'gc>(
                 AbcOp::FindDef { index } => {
                     let multiname = method
                         .translation_unit()
-                        .pool_maybe_uninitialized_multiname(index, &mut activation.context)?;
+                        .pool_maybe_uninitialized_multiname(activation, index)?;
 
                     if multiname.has_lazy_component() {
                         return Err(Error::AvmError(verify_error(
@@ -321,7 +328,7 @@ pub fn verify_method<'gc>(
                 AbcOp::GetLex { index } => {
                     let multiname = method
                         .translation_unit()
-                        .pool_maybe_uninitialized_multiname(index, &mut activation.context)?;
+                        .pool_maybe_uninitialized_multiname(activation, index)?;
 
                     if multiname.has_lazy_component() {
                         return Err(Error::AvmError(verify_error(
@@ -363,7 +370,7 @@ pub fn verify_method<'gc>(
                 | AbcOp::Coerce { index: name_index } => {
                     let multiname = method
                         .translation_unit()
-                        .pool_maybe_uninitialized_multiname(name_index, &mut activation.context)?;
+                        .pool_maybe_uninitialized_multiname(activation, name_index)?;
 
                     if multiname.has_lazy_component() {
                         // This matches FP's error message
@@ -372,7 +379,7 @@ pub fn verify_method<'gc>(
 
                     activation
                         .domain()
-                        .get_class(&mut activation.context, &multiname)
+                        .get_class(activation.context, &multiname)
                         .ok_or_else(|| {
                             make_error_1014(
                                 activation,
@@ -404,7 +411,79 @@ pub fn verify_method<'gc>(
 
     // Handle exceptions
     let mut new_exceptions = Vec::new();
-    for exception in body.exceptions.iter() {
+    for (exception_index, exception) in body.exceptions.iter().enumerate() {
+        // Resolve the variable name and target class.
+
+        let target_class = if exception.type_name.0 == 0 {
+            None
+        } else {
+            let pooled_type_name = method
+                .translation_unit()
+                .pool_maybe_uninitialized_multiname(activation, exception.type_name)?;
+
+            if pooled_type_name.has_lazy_component() {
+                // This matches FP's error message
+                return Err(make_error_1014(activation, "[]".into()));
+            }
+
+            let resolved_type = activation
+                .domain()
+                .get_class(activation.context, &pooled_type_name)
+                .ok_or_else(|| {
+                    make_error_1014(
+                        activation,
+                        pooled_type_name.to_qualified_name(activation.context.gc_context),
+                    )
+                })?;
+
+            Some(resolved_type)
+        };
+
+        let variable_name = if exception.variable_name.0 == 0 {
+            None
+        } else {
+            let pooled_variable_name = method
+                .translation_unit()
+                .pool_maybe_uninitialized_multiname(activation, exception.variable_name)?;
+
+            // FIXME: avmplus also seems to check the namespace(s)?
+            if pooled_variable_name.has_lazy_component()
+                || pooled_variable_name.is_attribute()
+                || pooled_variable_name.is_any_name()
+            {
+                // This matches FP's error message
+                return Err(make_error_1107(activation));
+            }
+
+            let namespaces = pooled_variable_name.namespace_set();
+
+            if namespaces.is_empty() {
+                // NOTE: avmplus segfaults here
+                panic!("Should have at least one namespace for QName in exception variable name");
+            }
+
+            let name = pooled_variable_name.local_name().expect("Just checked");
+
+            // avmplus uses the first namespace, regardless of how many namespaces there are.
+            Some(QName::new(namespaces[0], name))
+        };
+
+        if !seen_exception_indices.contains(&exception_index) {
+            // We need to push an exception because otherwise `newcatch` ops can try to
+            // read it, but we can give it dummy from/to/target offsets because no code
+            // can actually trigger it (and we might not even have valid offsets anyway).
+            new_exceptions.push(Exception {
+                from_offset: 0,
+                to_offset: 0,
+                target_offset: 0,
+                variable_name,
+                target_class,
+            });
+            continue;
+        }
+
+        // Now resolve the offsets.
+
         // NOTE: This is actually wrong, we should be using the byte offsets in
         // `Activation::handle_err`, not the opcode offsets. avmplus allows for from/to
         // (but not targets) that aren't on a opcode, and some obfuscated SWFs have them.
@@ -477,63 +556,6 @@ pub fn verify_method<'gc>(
         if new_target_offset as usize >= new_code.len() {
             return Err(make_error_1054(activation));
         }
-
-        let target_class = if exception.type_name.0 == 0 {
-            None
-        } else {
-            let pooled_type_name = method
-                .translation_unit()
-                .pool_maybe_uninitialized_multiname(exception.type_name, &mut activation.context)?;
-
-            if pooled_type_name.has_lazy_component() {
-                // This matches FP's error message
-                return Err(make_error_1014(activation, "[]".into()));
-            }
-
-            let resolved_type = activation
-                .domain()
-                .get_class(&mut activation.context, &pooled_type_name)
-                .ok_or_else(|| {
-                    make_error_1014(
-                        activation,
-                        pooled_type_name.to_qualified_name(activation.context.gc_context),
-                    )
-                })?;
-
-            Some(resolved_type)
-        };
-
-        let variable_name = if exception.variable_name.0 == 0 {
-            None
-        } else {
-            let pooled_variable_name = method
-                .translation_unit()
-                .pool_maybe_uninitialized_multiname(
-                    exception.variable_name,
-                    &mut activation.context,
-                )?;
-
-            // FIXME: avmplus also seems to check the namespace(s)?
-            if pooled_variable_name.has_lazy_component()
-                || pooled_variable_name.is_attribute()
-                || pooled_variable_name.is_any_name()
-            {
-                // This matches FP's error message
-                return Err(make_error_1107(activation));
-            }
-
-            let namespaces = pooled_variable_name.namespace_set();
-
-            if namespaces.is_empty() {
-                // NOTE: avmplus segfaults here
-                panic!("Should have at least one namespace for QName in exception variable name");
-            }
-
-            let name = pooled_variable_name.local_name().expect("Just checked");
-
-            // avmplus uses the first namespace, regardless of how many namespaces there are.
-            Some(QName::new(namespaces[0], name))
-        };
 
         new_exceptions.push(Exception {
             from_offset: new_from_offset,
@@ -649,26 +671,24 @@ pub fn resolve_param_config<'gc>(
     let mut resolved_param_config = Vec::new();
 
     for param in param_config {
-        if param.param_type_name.has_lazy_component() {
-            return Err(make_error_1014(activation, "[]".into()));
-        }
+        let resolved_class = if let Some(param_type_name) = param.param_type_name {
+            if param_type_name.has_lazy_component() {
+                return Err(make_error_1014(activation, "[]".into()));
+            }
 
-        let resolved_class = if param.param_type_name.is_any_name() {
-            None
+            Some(
+                activation
+                    .domain()
+                    .get_class(activation.context, &param_type_name)
+                    .ok_or_else(|| {
+                        make_error_1014(
+                            activation,
+                            param_type_name.to_qualified_name(activation.gc()),
+                        )
+                    })?,
+            )
         } else {
-            let lookedup_class = activation
-                .domain()
-                .get_class(&mut activation.context, &param.param_type_name)
-                .ok_or_else(|| {
-                    make_error_1014(
-                        activation,
-                        param
-                            .param_type_name
-                            .to_qualified_name(activation.context.gc_context),
-                    )
-                })?;
-
-            Some(lookedup_class)
+            None
         };
 
         resolved_param_config.push(ResolvedParamConfig {
@@ -683,27 +703,24 @@ pub fn resolve_param_config<'gc>(
 
 fn resolve_return_type<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    return_type: &Multiname<'gc>,
+    return_type: Option<Gc<'gc, Multiname<'gc>>>,
 ) -> Result<Option<Class<'gc>>, Error<'gc>> {
-    if return_type.has_lazy_component() {
-        return Err(make_error_1014(activation, "[]".into()));
-    }
+    if let Some(return_type) = return_type {
+        if return_type.has_lazy_component() {
+            return Err(make_error_1014(activation, "[]".into()));
+        }
 
-    if return_type.is_any_name() {
-        return Ok(None);
+        Ok(Some(
+            activation
+                .domain()
+                .get_class(activation.context, &return_type)
+                .ok_or_else(|| {
+                    make_error_1014(activation, return_type.to_qualified_name(activation.gc()))
+                })?,
+        ))
+    } else {
+        Ok(None)
     }
-
-    Ok(Some(
-        activation
-            .domain()
-            .get_class(&mut activation.context, return_type)
-            .ok_or_else(|| {
-                make_error_1014(
-                    activation,
-                    return_type.to_qualified_name(activation.context.gc_context),
-                )
-            })?,
-    ))
 }
 
 // Taken from avmplus's opcodes.tbl
@@ -809,11 +826,9 @@ fn pool_multiname<'gc>(
     translation_unit: TranslationUnit<'gc>,
     index: Index<AbcMultiname>,
 ) -> Result<Gc<'gc, Multiname<'gc>>, Error<'gc>> {
-    if index.0 == 0 {
-        return Err(make_error_1032(activation, 0));
-    }
-
-    translation_unit.pool_maybe_uninitialized_multiname(index, &mut activation.context)
+    // `Multiname::from_abc_index` will do constant pool range checks anyway, so
+    // don't perform an extra one here
+    translation_unit.pool_maybe_uninitialized_multiname(activation, index)
 }
 
 fn pool_string<'gc>(
@@ -1086,7 +1101,7 @@ fn resolve_op<'gc>(
 
             let class = activation
                 .domain()
-                .get_class(&mut activation.context, &multiname)
+                .get_class(activation.context, &multiname)
                 .unwrap();
             // Verifier guarantees that class exists
 
@@ -1099,7 +1114,7 @@ fn resolve_op<'gc>(
 
             let class = activation
                 .domain()
-                .get_class(&mut activation.context, &multiname)
+                .get_class(activation.context, &multiname)
                 .unwrap();
             // Verifier guarantees that class exists
 
@@ -1146,7 +1161,7 @@ fn resolve_op<'gc>(
 
             let class = activation
                 .domain()
-                .get_class(&mut activation.context, &multiname)
+                .get_class(activation.context, &multiname)
                 .unwrap();
             // Verifier guarantees that class exists
 

@@ -12,25 +12,30 @@
     "scripts": {
         "prebuild": "tsx tools/build_wasm.ts",
         "build": "tsc --build --force",
-        "postbuild": "tsx tools/set_version.ts && tsx tools/bundle_texts.ts",
+        "postbuild": "tsx tools/set_version.ts && tsx tools/bundle_texts.ts && tsx tools/bundle_css.ts",
         "docs": "typedoc",
         "test": "mocha",
         "checkTypes": "tsc --noemit && tsc --noemit -p tools"
     },
     "dependencies": {
-        "wasm-feature-detect": "^1.6.2"
+        "wasm-feature-detect": "^1.8.0"
     },
     "devDependencies": {
         "@fluent/bundle": "^0.18.0",
         "@fluent/langneg": "^0.7.0",
         "@tsconfig/strictest": "^2.0.5",
-        "@types/mocha": "^10.0.7",
-        "mocha": "^10.6.0",
-        "replace-in-file": "^8.1.0",
-        "typedoc": "^0.26.4",
-        "typescript": "^5.5.3",
-        "tsx": "^4.16.2",
-        "tsx-dom": "^3.0.1"
+        "@types/mocha": "^10.0.8",
+        "autoprefixer": "^10.4.20",
+        "cssnano": "^7.0.6",
+        "cssnano-preset-advanced": "^7.0.6",
+        "mocha": "^10.7.3",
+        "postcss": "^8.4.47",
+        "postcss-nesting": "^13.0.0",
+        "replace-in-file": "^8.2.0",
+        "tsx": "^4.19.1",
+        "tsx-dom": "^3.0.1",
+        "typedoc": "^0.26.7",
+        "typescript": "^5.6.2"
     },
     "sideEffects": false
 }

@@ -23,9 +23,9 @@ image = { workspace = true }
 naga-agal = { path = "../naga-agal" }
 naga-pixelbender = { path = "../naga-pixelbender" }
 profiling = { version = "1.0", default-features = false, optional = true }
-lru = "0.12.3"
+lru = "0.12.4"
 naga = { workspace = true }
-indexmap = "2.2.6"
+indexmap = "2.5.0"
 
 # desktop
 [target.'cfg(not(target_family = "wasm"))'.dependencies.futures]
@@ -33,12 +33,11 @@ workspace = true
 
 # wasm
 [target.'cfg(target_family = "wasm")'.dependencies.web-sys]
-version = "0.3.69"
+workspace = true
 features = ["HtmlCanvasElement"]
 
 [features]
 render_debug_labels = []
-render_trace = ["wgpu/trace"]
 webgl = ["wgpu/webgl"]
 profile-with-tracy = ["profiling", "profiling/profile-with-tracy"]
 

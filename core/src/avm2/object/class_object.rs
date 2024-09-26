@@ -18,22 +18,26 @@ use crate::avm2::QName;
 use crate::avm2::TranslationUnit;
 use crate::string::AvmString;
 use fnv::FnvHashMap;
-use gc_arena::{Collect, GcCell, GcWeakCell, Mutation};
-use std::cell::{BorrowError, Ref, RefMut};
+use gc_arena::barrier::unlock;
+use gc_arena::{
+    lock::{Lock, RefLock},
+    Collect, Gc, GcWeak, Mutation,
+};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 
 /// An Object which can be called to execute its function code.
 #[derive(Collect, Clone, Copy)]
 #[collect(no_drop)]
-pub struct ClassObject<'gc>(pub GcCell<'gc, ClassObjectData<'gc>>);
+pub struct ClassObject<'gc>(pub Gc<'gc, ClassObjectData<'gc>>);
 
 #[derive(Collect, Clone, Copy, Debug)]
 #[collect(no_drop)]
-pub struct ClassObjectWeak<'gc>(pub GcWeakCell<'gc, ClassObjectData<'gc>>);
+pub struct ClassObjectWeak<'gc>(pub GcWeak<'gc, ClassObjectData<'gc>>);
 
 #[derive(Collect, Clone)]
 #[collect(no_drop)]
+#[repr(C, align(8))]
 pub struct ClassObjectData<'gc> {
     /// Base script object
     base: ScriptObjectData<'gc>,
@@ -43,13 +47,13 @@ pub struct ClassObjectData<'gc> {
 
     /// The associated prototype.
     /// Should always be non-None after initialization.
-    prototype: Option<Object<'gc>>,
+    prototype: Lock<Option<Object<'gc>>>,
 
     /// The captured scope that all class traits will use.
     class_scope: ScopeChain<'gc>,
 
     /// The captured scope that all instance traits will use.
-    instance_scope: ScopeChain<'gc>,
+    instance_scope: Lock<ScopeChain<'gc>>,
 
     /// The base class of this one.
     ///
@@ -65,11 +69,15 @@ pub struct ClassObjectData<'gc> {
     /// as `None` here. AVM2 considers both applications to be separate
     /// classes, though we consider the parameter to be the class `Object` when
     /// we get a param of `null`.
-    applications: FnvHashMap<Option<Class<'gc>>, ClassObject<'gc>>,
+    applications: RefLock<FnvHashMap<Option<Class<'gc>>, ClassObject<'gc>>>,
 
     /// VTable used for instances of this class.
     instance_vtable: VTable<'gc>,
 }
+
+const _: () = assert!(std::mem::offset_of!(ClassObjectData, base) == 0);
+const _: () =
+    assert!(std::mem::align_of::<ClassObjectData>() == std::mem::align_of::<ScriptObjectData>());
 
 impl<'gc> ClassObject<'gc> {
     /// Allocate the prototype for this class.
@@ -160,30 +168,34 @@ impl<'gc> ClassObject<'gc> {
             }
         }
 
-        let class_object = ClassObject(GcCell::new(
+        let mc = activation.context.gc_context;
+
+        let class_object = ClassObject(Gc::new(
             activation.context.gc_context,
             ClassObjectData {
-                base: ScriptObjectData::custom_new(c_class, None, None),
+                // We pass `custom_new` the temporary vtable of the class object
+                // because we don't have the full vtable created yet. We'll
+                // set it to the true vtable in `into_finished_class`.
+                base: ScriptObjectData::custom_new(c_class, None, c_class.vtable()),
                 class,
-                prototype: None,
+                prototype: Lock::new(None),
                 class_scope: scope,
-                instance_scope: scope,
+                instance_scope: Lock::new(scope),
                 superclass_object,
-                applications: Default::default(),
-                instance_vtable: VTable::empty(activation.context.gc_context),
+                applications: RefLock::new(Default::default()),
+                instance_vtable: VTable::empty(mc),
             },
         ));
 
         // instance scope = [..., class object]
-        let instance_scope = scope.chain(
-            activation.context.gc_context,
-            &[Scope::new(class_object.into())],
-        );
+        let instance_scope = scope.chain(mc, &[Scope::new(class_object.into())]);
 
-        class_object
-            .0
-            .write(activation.context.gc_context)
-            .instance_scope = instance_scope;
+        unlock!(
+            Gc::write(mc, class_object.0),
+            ClassObjectData,
+            instance_scope
+        )
+        .set(instance_scope);
         class_object.init_instance_vtable(activation)?;
 
         class.add_class_object(activation.context.gc_context, class_object);
@@ -198,8 +210,7 @@ impl<'gc> ClassObject<'gc> {
 
         self.instance_vtable().init_vtable(
             class,
-            Some(self),
-            &class.traits(),
+            self.superclass_object(),
             Some(self.instance_scope()),
             self.superclass_object().map(|cls| cls.instance_vtable()),
             activation.context.gc_context,
@@ -235,20 +246,19 @@ impl<'gc> ClassObject<'gc> {
             .c_class()
             .expect("ClassObject should have an i_class");
 
+        let class_classobject = activation.avm2().classes().class;
+
         // class vtable == class traits + Class instance traits
         let class_vtable = VTable::empty(activation.context.gc_context);
         class_vtable.init_vtable(
             c_class,
-            Some(self),
-            &c_class.traits(),
+            Some(class_classobject),
             Some(self.class_scope()),
-            Some(activation.avm2().classes().class.instance_vtable()),
+            Some(class_classobject.instance_vtable()),
             activation.context.gc_context,
         );
 
         self.set_vtable(activation.context.gc_context, class_vtable);
-        self.base_mut(activation.context.gc_context)
-            .install_instance_slots();
 
         self.run_class_initializer(activation)?;
 
@@ -261,13 +271,11 @@ impl<'gc> ClassObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
         class_proto: Object<'gc>,
     ) -> Result<(), Error<'gc>> {
-        self.0.write(activation.context.gc_context).prototype = Some(class_proto);
+        let mc = activation.context.gc_context;
+
+        unlock!(Gc::write(mc, self.0), ClassObjectData, prototype).set(Some(class_proto));
         class_proto.set_string_property_local("constructor", self.into(), activation)?;
-        class_proto.set_local_property_is_enumerable(
-            activation.context.gc_context,
-            "constructor".into(),
-            false,
-        );
+        class_proto.set_local_property_is_enumerable(mc, "constructor".into(), false);
 
         Ok(())
     }
@@ -284,13 +292,11 @@ impl<'gc> ClassObject<'gc> {
         // interfaces (i.e. those that were not already implemented by the superclass)
         // Otherwise, our behavior diverges from Flash Player in certain cases.
         // See the ignored test 'tests/tests/swfs/avm2/weird_superinterface_properties/'
+        let internal_ns = activation.avm2().namespaces.public_vm_internal();
         for interface in &*class.all_interfaces() {
             for interface_trait in &*interface.traits() {
                 if !interface_trait.name().namespace().is_public() {
-                    let public_name = QName::new(
-                        activation.context.avm2.public_namespace_vm_internal,
-                        interface_trait.name().local_name(),
-                    );
+                    let public_name = QName::new(internal_ns, interface_trait.name().local_name());
                     self.instance_vtable().copy_property_for_interface(
                         activation.context.gc_context,
                         public_name,
@@ -309,9 +315,7 @@ impl<'gc> ClassObject<'gc> {
     /// `Class` and `Object`. All other types should pull `Class`'s prototype
     /// and type object from the `Avm2` instance.
     pub fn link_type(self, gc_context: &Mutation<'gc>, proto: Object<'gc>) {
-        let mut write = self.0.write(gc_context);
-
-        write.base.set_proto(proto);
+        self.base().set_proto(gc_context, proto);
     }
 
     /// Run the class's initializer method.
@@ -320,8 +324,9 @@ impl<'gc> ClassObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
         let object: Object<'gc> = self.into();
+        let class_classobject = activation.avm2().classes().class;
 
-        let scope = self.0.read().class_scope;
+        let scope = self.0.class_scope;
         let c_class = self
             .inner_class_definition()
             .c_class()
@@ -333,7 +338,8 @@ impl<'gc> ClassObject<'gc> {
             class_initializer,
             scope,
             Some(object),
-            Some(self),
+            Some(class_classobject),
+            Some(c_class),
         );
 
         class_init_fn.call(object.into(), &[], activation)?;
@@ -348,13 +354,14 @@ impl<'gc> ClassObject<'gc> {
         arguments: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        let scope = self.0.read().instance_scope;
+        let scope = self.0.instance_scope.get();
         let method = self.constructor();
         exec(
             method,
             scope,
             receiver.coerce_to_object(activation)?,
-            Some(self),
+            self.superclass_object(),
+            Some(self.inner_class_definition()),
             arguments,
             activation,
             self.into(),
@@ -366,19 +373,20 @@ impl<'gc> ClassObject<'gc> {
     /// The native initializer is called when native code needs to construct an
     /// object, or when supercalling into a parent constructor (as there are
     /// classes that cannot be constructed but can be supercalled).
-    pub fn call_native_init(
+    pub fn call_super_init(
         self,
         receiver: Value<'gc>,
         arguments: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        let scope = self.0.read().instance_scope;
-        let method = self.native_constructor();
+        let scope = self.0.instance_scope.get();
+        let method = self.super_constructor();
         exec(
             method,
             scope,
             receiver.coerce_to_object(activation)?,
-            Some(self),
+            self.superclass_object(),
+            Some(self.inner_class_definition()),
             arguments,
             activation,
             self.into(),
@@ -437,17 +445,18 @@ impl<'gc> ClassObject<'gc> {
         if let Some(Property::Method { disp_id, .. }) = property {
             // todo: handle errors
             let ClassBoundMethod {
-                class_obj,
+                class,
+                super_class_obj,
                 scope,
                 method,
-                ..
             } = self.instance_vtable().get_full_method(disp_id).unwrap();
             let callee = FunctionObject::from_method(
                 activation,
                 method,
                 scope.expect("Scope should exist here"),
                 Some(receiver),
-                class_obj,
+                super_class_obj,
+                Some(class),
             );
 
             callee.call(receiver.into(), arguments, activation)
@@ -497,17 +506,18 @@ impl<'gc> ClassObject<'gc> {
             ) => {
                 // todo: handle errors
                 let ClassBoundMethod {
-                    class_obj,
+                    class,
+                    super_class_obj,
                     scope,
                     method,
-                    ..
                 } = self.instance_vtable().get_full_method(disp_id).unwrap();
                 let callee = FunctionObject::from_method(
                     activation,
                     method,
                     scope.expect("Scope should exist here"),
                     Some(receiver),
-                    class_obj,
+                    super_class_obj,
+                    Some(class),
                 );
 
                 // We call getters, but return the actual function object for normal methods
@@ -580,13 +590,13 @@ impl<'gc> ClassObject<'gc> {
             }) => {
                 // todo: handle errors
                 let ClassBoundMethod {
-                    class_obj,
+                    class,
+                    super_class_obj,
                     scope,
                     method,
-                    ..
                 } = self.instance_vtable().get_full_method(disp_id).unwrap();
                 let callee =
-                    FunctionObject::from_method(activation, method, scope.expect("Scope should exist here"), Some(receiver), class_obj);
+                    FunctionObject::from_method(activation, method, scope.expect("Scope should exist here"), Some(receiver), super_class_obj, Some(class));
 
                 callee.call(receiver.into(), &[value], activation)?;
                 Ok(())
@@ -603,11 +613,13 @@ impl<'gc> ClassObject<'gc> {
 
     pub fn add_application(
         &self,
-        gc_context: &Mutation<'gc>,
+        mc: &Mutation<'gc>,
         param: Option<Class<'gc>>,
         cls: ClassObject<'gc>,
     ) {
-        self.0.write(gc_context).applications.insert(param, cls);
+        unlock!(Gc::write(mc, self.0), ClassObjectData, applications)
+            .borrow_mut()
+            .insert(param, cls);
     }
 
     /// Parametrize this class. This does not check to ensure that this class is generic.
@@ -618,7 +630,7 @@ impl<'gc> ClassObject<'gc> {
     ) -> Result<ClassObject<'gc>, Error<'gc>> {
         let self_class = self.inner_class_definition();
 
-        if let Some(application) = self.0.read().applications.get(&class_param) {
+        if let Some(application) = self.0.applications.borrow().get(&class_param) {
             return Ok(*application);
         }
 
@@ -626,7 +638,7 @@ impl<'gc> ClassObject<'gc> {
         // so it must be a simple Vector.<*>-derived class.
 
         let parameterized_class =
-            Class::with_type_param(&mut activation.context, self_class, class_param);
+            Class::with_type_param(activation.context, self_class, class_param);
 
         // NOTE: this isn't fully accurate, but much simpler.
         // FP's Vector is more of special case that literally copies some parent class's properties
@@ -636,10 +648,13 @@ impl<'gc> ClassObject<'gc> {
         let class_object =
             Self::from_class(activation, parameterized_class, Some(vector_star_cls))?;
 
-        self.0
-            .write(activation.context.gc_context)
-            .applications
-            .insert(class_param, class_object);
+        unlock!(
+            Gc::write(activation.context.gc_context, self.0),
+            ClassObjectData,
+            applications
+        )
+        .borrow_mut()
+        .insert(class_param, class_object);
 
         Ok(class_object)
     }
@@ -656,8 +671,8 @@ impl<'gc> ClassObject<'gc> {
         self.inner_class_definition().instance_init()
     }
 
-    pub fn native_constructor(self) -> Method<'gc> {
-        self.inner_class_definition().native_instance_init()
+    pub fn super_constructor(self) -> Method<'gc> {
+        self.inner_class_definition().super_init()
     }
 
     pub fn call_handler(self) -> Option<Method<'gc>> {
@@ -665,36 +680,27 @@ impl<'gc> ClassObject<'gc> {
     }
 
     pub fn instance_vtable(self) -> VTable<'gc> {
-        self.0.read().instance_vtable
-    }
-
-    /// Like `inner_class_definition`, but returns an `Err(BorrowError)` instead of panicking
-    /// if our `GcCell` is already mutably borrowed. This is useful
-    /// in contexts where panicking would be extremely undesirable,
-    /// and there's a fallback if we cannot obtain the `Class`
-    /// (such as `Debug` impls),
-    pub fn try_inner_class_definition(&self) -> Result<Class<'gc>, BorrowError> {
-        self.0.try_read().map(|c| c.class)
+        self.0.instance_vtable
     }
 
     pub fn inner_class_definition(self) -> Class<'gc> {
-        self.0.read().class
+        self.0.class
     }
 
     pub fn prototype(self) -> Object<'gc> {
-        self.0.read().prototype.unwrap()
+        self.0.prototype.get().unwrap()
     }
 
     pub fn class_scope(self) -> ScopeChain<'gc> {
-        self.0.read().class_scope
+        self.0.class_scope
     }
 
     pub fn instance_scope(self) -> ScopeChain<'gc> {
-        self.0.read().instance_scope
+        self.0.instance_scope.get()
     }
 
     pub fn superclass_object(self) -> Option<ClassObject<'gc>> {
-        self.0.read().superclass_object
+        self.0.superclass_object
     }
 
     fn instance_allocator(self) -> AllocatorFn {
@@ -709,9 +715,7 @@ impl<'gc> ClassObject<'gc> {
     /// we need infallible access to *something* to print
     /// out.
     pub fn debug_class_name(&self) -> Box<dyn Debug + 'gc> {
-        let class_name = self
-            .try_inner_class_definition()
-            .and_then(|class| class.try_name());
+        let class_name = self.inner_class_definition().try_name();
 
         match class_name {
             Ok(class_name) => Box::new(class_name),
@@ -721,22 +725,22 @@ impl<'gc> ClassObject<'gc> {
 }
 
 impl<'gc> TObject<'gc> for ClassObject<'gc> {
-    fn base(&self) -> Ref<ScriptObjectData<'gc>> {
-        Ref::map(self.0.read(), |read| &read.base)
-    }
+    fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
+        // SAFETY: Object data is repr(C), and a compile-time assert ensures
+        // that the ScriptObjectData stays at offset 0 of the struct- so the
+        // layouts are compatible
 
-    fn base_mut(&self, mc: &Mutation<'gc>) -> RefMut<ScriptObjectData<'gc>> {
-        RefMut::map(self.0.write(mc), |write| &mut write.base)
+        unsafe { Gc::cast(self.0) }
     }
 
     fn as_ptr(&self) -> *const ObjectPtr {
-        self.0.as_ptr() as *const ObjectPtr
+        Gc::as_ptr(self.0) as *const ObjectPtr
     }
 
     fn to_string(&self, activation: &mut Activation<'_, 'gc>) -> Result<Value<'gc>, Error<'gc>> {
         Ok(AvmString::new_utf8(
             activation.context.gc_context,
-            format!("[class {}]", self.0.read().class.name().local_name()),
+            format!("[class {}]", self.0.class.name().local_name()),
         )
         .into())
     }
@@ -759,12 +763,13 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         if let Some(call_handler) = self.call_handler() {
-            let scope = self.0.read().class_scope;
+            let scope = self.0.class_scope;
             exec(
                 call_handler,
                 scope,
                 self.into(),
-                Some(self),
+                self.superclass_object(),
+                Some(self.inner_class_definition()),
                 arguments,
                 activation,
                 self.into(),
@@ -792,8 +797,6 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
 
         let instance = instance_allocator(self, activation)?;
 
-        instance.install_instance_slots(activation.context.gc_context);
-
         self.call_init(instance.into(), arguments, activation)?;
 
         Ok(instance)
@@ -801,18 +804,6 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
 
     fn as_class_object(&self) -> Option<ClassObject<'gc>> {
         Some(*self)
-    }
-
-    fn set_local_property_is_enumerable(
-        &self,
-        mc: &Mutation<'gc>,
-        name: AvmString<'gc>,
-        is_enumerable: bool,
-    ) {
-        self.0
-            .write(mc)
-            .base
-            .set_local_property_is_enumerable(name, is_enumerable);
     }
 
     fn apply(
@@ -887,7 +878,7 @@ impl<'gc> Debug for ClassObject<'gc> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         f.debug_struct("ClassObject")
             .field("name", &self.debug_class_name())
-            .field("ptr", &self.0.as_ptr())
+            .field("ptr", &Gc::as_ptr(self.0))
             .finish()
     }
 }

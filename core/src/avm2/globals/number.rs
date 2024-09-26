@@ -30,7 +30,7 @@ fn instance_init<'gc>(
 }
 
 /// Implements `Number`'s native instance initializer.
-fn native_instance_init<'gc>(
+fn super_init<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
@@ -58,7 +58,8 @@ fn class_init<'gc>(
             Method::from_builtin(to_exponential, "toExponential", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -70,7 +71,8 @@ fn class_init<'gc>(
             Method::from_builtin(to_fixed, "toFixed", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -82,7 +84,8 @@ fn class_init<'gc>(
             Method::from_builtin(to_precision, "toPrecision", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -94,7 +97,8 @@ fn class_init<'gc>(
             Method::from_builtin(to_string, "toLocaleString", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -106,7 +110,8 @@ fn class_init<'gc>(
             Method::from_builtin(to_string, "toString", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -118,7 +123,8 @@ fn class_init<'gc>(
             Method::from_builtin(value_of, "valueOf", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -367,25 +373,23 @@ fn value_of<'gc>(
 
 /// Construct `Number`'s class.
 pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
-    let mc = activation.context.gc_context;
+    let mc = activation.gc();
+    let namespaces = activation.avm2().namespaces;
+
     let class = Class::new(
-        QName::new(activation.avm2().public_namespace_base_version, "Number"),
-        Some(activation.avm2().classes().object.inner_class_definition()),
+        QName::new(namespaces.public_all(), "Number"),
+        Some(activation.avm2().class_defs().object),
         Method::from_builtin(instance_init, "<Number instance initializer>", mc),
         Method::from_builtin(class_init, "<Number class initializer>", mc),
-        activation.avm2().classes().class.inner_class_definition(),
+        activation.avm2().class_defs().class,
         mc,
     );
 
     class.set_attributes(mc, ClassAttributes::FINAL | ClassAttributes::SEALED);
     class.set_instance_allocator(mc, primitive_allocator);
-    class.set_native_instance_init(
+    class.set_super_init(
         mc,
-        Method::from_builtin(
-            native_instance_init,
-            "<Number native instance initializer>",
-            mc,
-        ),
+        Method::from_builtin(super_init, "<Number native instance initializer>", mc),
     );
     class.set_call_handler(
         mc,
@@ -408,14 +412,14 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
         ("LOG10E", std::f64::consts::LOG10_E),
     ];
     class.define_constant_number_class_traits(
-        activation.avm2().public_namespace_base_version,
+        namespaces.public_all(),
         CLASS_CONSTANTS_NUMBER,
         activation,
     );
 
     const CLASS_CONSTANTS_INT: &[(&str, i32)] = &[("length", 1)];
     class.define_constant_int_class_traits(
-        activation.avm2().public_namespace_base_version,
+        namespaces.public_all(),
         CLASS_CONSTANTS_INT,
         activation,
     );
@@ -427,22 +431,18 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
         ("toString", to_string),
         ("valueOf", value_of),
     ];
-    class.define_builtin_instance_methods(
-        mc,
-        activation.avm2().as3_namespace,
-        AS3_INSTANCE_METHODS,
-    );
+    class.define_builtin_instance_methods(mc, namespaces.as3, AS3_INSTANCE_METHODS);
 
     class.mark_traits_loaded(activation.context.gc_context);
     class
-        .init_vtable(&mut activation.context)
+        .init_vtable(activation.context)
         .expect("Native class's vtable should initialize");
 
     let c_class = class.c_class().expect("Class::new returns an i_class");
 
     c_class.mark_traits_loaded(activation.context.gc_context);
     c_class
-        .init_vtable(&mut activation.context)
+        .init_vtable(activation.context)
         .expect("Native class's vtable should initialize");
 
     class

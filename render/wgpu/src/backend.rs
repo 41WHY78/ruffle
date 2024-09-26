@@ -1105,8 +1105,8 @@ pub async fn request_adapter_and_device(
             let names = get_backend_names(backend);
             if names.is_empty() {
                 "Ruffle requires hardware acceleration, but no compatible graphics device was found (no backend provided?)".to_string()
-            } else if cfg!(target_os = "macos") {
-                "Ruffle does not support OpenGL on macOS.".to_string()
+            } else if cfg!(target_vendor = "apple") {
+                "Ruffle does not support OpenGL on macOS/iOS.".to_string()
             } else {
                 format!("Ruffle requires hardware acceleration, but no compatible graphics device was found supporting {}", format_list(&names, "or"))
             }
@@ -1134,7 +1134,6 @@ async fn request_device(
 
     let try_features = [
         wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
-        wgpu::Features::SHADER_UNUSED_VERTEX_OUTPUT,
         wgpu::Features::TEXTURE_COMPRESSION_BC,
         wgpu::Features::FLOAT32_FILTERABLE,
     ];
@@ -1151,6 +1150,7 @@ async fn request_device(
                 label: None,
                 required_features: features,
                 required_limits: limits,
+                memory_hints: Default::default(),
             },
             trace_path,
         )

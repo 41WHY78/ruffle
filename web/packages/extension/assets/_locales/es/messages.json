@@ -11,6 +11,9 @@
     "settings_autostart": {
         "message": "Reproduzca contenido automáticamente (y haga clic para restaurar el sonido)"
     },
+    "settings_swf_takeover": {
+        "message": "Reproduce archivos SWF en el navegador en vez de descargar"
+    },
     "settings_log_level": {
         "message": "Nivel de log"
     },
@@ -108,6 +111,9 @@
         "message": "Activar permanentemente en este sitio"
     },
     "permissions_explanation": {
-        "message": "La extensión de Ruffle funciona mejor si puede acceder a datos en todos los sitios web. Esto le permite ejecutarse cuando se carga cualquier sitio web por primera vez, lo que permite convencer a los sitios web que usan Flash Player inmediatamente para que permitan que se ejecute el contenido de Flash. También ofrece la posibilidad de cargar archivos SWF desde el reproductor interno en otras ubicaciones de la web. Si no otorga este permiso, tendrás que habilitar Ruffle manualmente en cada sitio web en el que quieras usarlo haciendo clic en el icono de la extension y habilitándolo para ese sitio web."
+        "message": "La extensión Ruffle trabaja mejor con la habilidad de acceder datos de todas las páginas. Esto le permite ser ejecutada cuando cualquier página primero carga, así permitiendo convencer paginas que hacen detección inmediata para que contenido Flash se ejecute. También le da la capacidad de cargar archivos SWF en su página de reproducción interna desde otras ubicaciones en la web y le permite cargar automáticamente enlaces SWF directos en esa página. Si no concede este permiso, tendrá que habilitar Ruffle manualmente en cada sitio web en el que desees utilizarlo haciendo clic en el icono de la extensión y permitiendo esa página."
+    },
+    "swf_player_permissions": {
+        "message": "Debes dar permiso a este origen URL para cargar SWF de este."
     }
 }

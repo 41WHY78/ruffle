@@ -14,8 +14,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
+use swf::avm2::read::Reader;
 use swf::avm2::types::*;
 use swf::avm2::write::Writer;
+use swf::extensions::ReadSwfExt;
 use swf::{DoAbc2, DoAbc2Flag, Header, Tag};
 use walkdir::WalkDir;
 
@@ -27,7 +29,7 @@ const RUFFLE_METADATA_NAME: &str = "Ruffle";
 const METADATA_INSTANCE_ALLOCATOR: &str = "InstanceAllocator";
 // Indicates that we should generate a reference to a native initializer
 // method (used as a metadata key with `Ruffle` metadata)
-const METADATA_NATIVE_INSTANCE_INIT: &str = "NativeInstanceInit";
+const METADATA_SUPER_INITIALIZER: &str = "SuperInitializer";
 /// Indicates that we should generate a reference to a class call handler
 /// method (used as a metadata key with `Ruffle` metadata)
 const METADATA_CALL_HANDLER: &str = "CallHandler";
@@ -298,6 +300,43 @@ fn strip_metadata(abc: &mut AbcFile) {
     }
 }
 
+/// If we don't properly declare 'namespace AS3' in the input to asc.jar, then
+/// a call like `self.AS3::toXMLString()` will end up getting compiled to weird bytecode like this:
+///
+/// ```pcode
+/// getlex Multiname("AS3",[PackageNamespace(""),PrivateNamespace(null,"35"),PackageInternalNs(""),PrivateNamespace(null,"33"),ProtectedNamespace("XML"),StaticProtectedNs("XML")])
+/// coerce QName(PackageNamespace(""),"Namespace")
+/// getproperty RTQName("toXMLString")
+/// getlocal2
+/// call 0
+/// ```
+///
+/// This will cause a new bound method to be created, instead of going through 'callproperty'.
+///
+/// We detect this case by looking for the weird 'getlex AS3', which should never happen normally.
+fn check_weird_namespace_lookup(abc: &AbcFile) -> Result<(), Box<dyn std::error::Error>> {
+    for body in &abc.method_bodies {
+        let mut reader = Reader::new(&body.code);
+        while reader.pos(&body.code) != body.code.len() {
+            let op: Op = reader.read_op()?;
+            if let Op::GetLex { index } = op {
+                let multiname = &abc.constant_pool.multinames[index.0 as usize - 1];
+                if let Multiname::QName { name, .. } | Multiname::Multiname { name, .. } = multiname
+                {
+                    let name =
+                        String::from_utf8_lossy(&abc.constant_pool.strings[name.0 as usize - 1]);
+                    if name == "AS3" {
+                        panic!(
+                            r#"Found getlex of "AS3" in method body. Make sure you have `namespace AS3 = "http://adobe.com/AS3/2006/builtin";` in your `package` block"#
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Handles native functions defined in our `playerglobal`
 ///
 /// The high-level idea is to generate code (specifically, a `TokenStream`)
@@ -319,10 +358,12 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
     let mut reader = swf::avm2::read::Reader::new(data);
     let mut abc = reader.read()?;
 
+    check_weird_namespace_lookup(&abc)?;
+
     let none_tokens = quote! { None };
     let mut rust_paths = vec![none_tokens.clone(); abc.methods.len()];
     let mut rust_instance_allocators = vec![none_tokens.clone(); abc.classes.len()];
-    let mut rust_native_instance_initializers = vec![none_tokens.clone(); abc.classes.len()];
+    let mut rust_super_initializers = vec![none_tokens.clone(); abc.classes.len()];
     let mut rust_call_handlers = vec![none_tokens; abc.classes.len()];
 
     let mut check_trait = |trait_: &Trait, parent: Option<Index<Multiname>>| {
@@ -376,7 +417,7 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
 
         let instance_allocator_method_name =
             "::".to_string() + &flash_to_rust_path(&class_name) + "_allocator";
-        let native_instance_init_method_name = "::native_instance_init".to_string();
+        let super_init_method_name = "::super_init".to_string();
         let call_handler_method_name = "::call_handler".to_string();
         for metadata_idx in &trait_.metadata {
             let metadata = &abc.metadata[metadata_idx.0 as usize];
@@ -410,15 +451,14 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
                             &instance_allocator_method_name,
                         );
                     }
-                    (None, METADATA_NATIVE_INSTANCE_INIT) if !is_versioning => {
-                        rust_native_instance_initializers[class_id as usize] =
-                            rust_method_name_and_path(
-                                &abc,
-                                trait_,
-                                None,
-                                "",
-                                &native_instance_init_method_name,
-                            )
+                    (None, METADATA_SUPER_INITIALIZER) if !is_versioning => {
+                        rust_super_initializers[class_id as usize] = rust_method_name_and_path(
+                            &abc,
+                            trait_,
+                            None,
+                            "",
+                            &super_init_method_name,
+                        )
                     }
                     (None, METADATA_CALL_HANDLER) if !is_versioning => {
                         rust_call_handlers[class_id as usize] = rust_method_name_and_path(
@@ -490,13 +530,13 @@ fn write_native_table(data: &[u8], out_dir: &Path) -> Result<Vec<u8>, Box<dyn st
 
         // This is very similar to `NATIVE_METHOD_TABLE`, but we have one entry per
         // class, rather than per method. When an entry is `Some(fn_ptr)`, we use
-        // `fn_ptr` as the native initializer for the corresponding class when we
+        // `fn_ptr` as the super initializer for the corresponding class when we
         // load it into Ruffle.
-        pub const NATIVE_INSTANCE_INIT_TABLE: &[Option<(&'static str, crate::avm2::method::NativeMethodImpl)>] = &[
-            #(#rust_native_instance_initializers,)*
+        pub const NATIVE_SUPER_INITIALIZER_TABLE: &[Option<(&'static str, crate::avm2::method::NativeMethodImpl)>] = &[
+            #(#rust_super_initializers,)*
         ];
 
-        // This is very similar to `NATIVE_INSTANCE_INIT_TABLE`.
+        // This is very similar to `NATIVE_SUPER_INITIALIZER_TABLE`.
         // When an entry is `Some(fn_ptr)`, we use
         // `fn_ptr` as the native call handler for the corresponding class when we
         // load it into Ruffle.

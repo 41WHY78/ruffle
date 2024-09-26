@@ -7,7 +7,6 @@ use crate::avm2::object::{FunctionObject, Object, TObject};
 use crate::avm2::traits::Trait;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::avm2::Multiname;
 use crate::avm2::QName;
 
 /// Implements `Object`'s instance initializer.
@@ -24,14 +23,14 @@ fn class_call<'gc>(
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let this_class = activation.subclass_object().unwrap();
+    let object_class = activation.avm2().classes().object;
 
     if args.is_empty() {
-        return this_class.construct(activation, args).map(|o| o.into());
+        return object_class.construct(activation, args).map(|o| o.into());
     }
     let arg = args.get(0).cloned().unwrap();
     if matches!(arg, Value::Undefined) || matches!(arg, Value::Null) {
-        return this_class.construct(activation, args).map(|o| o.into());
+        return object_class.construct(activation, args).map(|o| o.into());
     }
     Ok(arg)
 }
@@ -54,7 +53,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(has_own_property, "hasOwnProperty", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -66,7 +66,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(property_is_enumerable, "propertyIsEnumerable", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -82,7 +83,8 @@ pub fn class_init<'gc>(
             ),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -94,7 +96,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(is_prototype_of, "isPrototypeOf", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -106,7 +109,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(to_string, "toString", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -118,7 +122,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(to_locale_string, "toLocaleString", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -130,7 +135,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(value_of, "valueOf", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -251,9 +257,11 @@ pub fn init<'gc>(
 
 /// Construct `Object`'s i_class.
 pub fn create_i_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
-    let gc_context = activation.context.gc_context;
+    let gc_context = activation.gc();
+    let namespaces = activation.avm2().namespaces;
+
     let object_i_class = Class::custom_new(
-        QName::new(activation.avm2().public_namespace_base_version, "Object"),
+        QName::new(namespaces.public_all(), "Object"),
         None,
         Method::from_builtin(instance_init, "<Object instance initializer>", gc_context),
         gc_context,
@@ -270,43 +278,31 @@ pub fn create_i_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
         (
             "hasOwnProperty",
             has_own_property,
-            vec![ParamConfig::optional(
-                "name",
-                Multiname::any(activation.context.gc_context),
-                Value::Undefined,
-            )],
-            Multiname::new(activation.avm2().public_namespace_base_version, "Boolean"),
+            vec![ParamConfig::optional("name", None, Value::Undefined)],
+            Some(activation.avm2().multinames.boolean),
         ),
         (
             "isPrototypeOf",
             is_prototype_of,
-            vec![ParamConfig::optional(
-                "theClass",
-                Multiname::any(activation.context.gc_context),
-                Value::Undefined,
-            )],
-            Multiname::new(activation.avm2().public_namespace_base_version, "Boolean"),
+            vec![ParamConfig::optional("theClass", None, Value::Undefined)],
+            Some(activation.avm2().multinames.boolean),
         ),
         (
             "propertyIsEnumerable",
             property_is_enumerable,
-            vec![ParamConfig::optional(
-                "name",
-                Multiname::any(activation.context.gc_context),
-                Value::Undefined,
-            )],
-            Multiname::new(activation.avm2().public_namespace_base_version, "Boolean"),
+            vec![ParamConfig::optional("name", None, Value::Undefined)],
+            Some(activation.avm2().multinames.boolean),
         ),
     ];
     object_i_class.define_builtin_instance_methods_with_sig(
         gc_context,
-        activation.avm2().as3_namespace,
+        namespaces.as3,
         as3_instance_methods,
     );
 
     object_i_class.mark_traits_loaded(activation.context.gc_context);
     object_i_class
-        .init_vtable(&mut activation.context)
+        .init_vtable(activation.context)
         .expect("Native class's vtable should initialize");
 
     object_i_class
@@ -317,9 +313,11 @@ pub fn create_c_class<'gc>(
     activation: &mut Activation<'_, 'gc>,
     class_i_class: Class<'gc>,
 ) -> Class<'gc> {
-    let gc_context = activation.context.gc_context;
+    let gc_context = activation.gc();
+    let namespaces = activation.avm2().namespaces;
+
     let object_c_class = Class::custom_new(
-        QName::new(activation.avm2().public_namespace_base_version, "Object$"),
+        QName::new(namespaces.public_all(), "Object$"),
         Some(class_i_class),
         Method::from_builtin(class_init, "<Object class initializer>", gc_context),
         gc_context,
@@ -329,8 +327,8 @@ pub fn create_c_class<'gc>(
     object_c_class.define_instance_trait(
         gc_context,
         Trait::from_const(
-            QName::new(activation.avm2().public_namespace_base_version, "length"),
-            Multiname::new(activation.avm2().public_namespace_base_version, "int"),
+            QName::new(activation.avm2().namespaces.public_all(), "length"),
+            Some(activation.avm2().multinames.int),
             Some(1.into()),
         ),
     );
@@ -338,13 +336,13 @@ pub fn create_c_class<'gc>(
     const INTERNAL_INIT_METHOD: &[(&str, NativeMethodImpl)] = &[("init", init)];
     object_c_class.define_builtin_instance_methods(
         gc_context,
-        activation.avm2().internal_namespace,
+        namespaces.internal,
         INTERNAL_INIT_METHOD,
     );
 
     object_c_class.mark_traits_loaded(activation.context.gc_context);
     object_c_class
-        .init_vtable(&mut activation.context)
+        .init_vtable(activation.context)
         .expect("Native class's vtable should initialize");
 
     object_c_class

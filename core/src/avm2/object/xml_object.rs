@@ -12,9 +12,9 @@ use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
 use crate::avm2::{Error, Multiname};
 use core::fmt;
-use gc_arena::{Collect, GcCell, GcWeakCell, Mutation};
+use gc_arena::barrier::unlock;
+use gc_arena::{lock::Lock, Collect, Gc, GcWeak, Mutation};
 use ruffle_wstr::WString;
-use std::cell::{Ref, RefMut};
 
 use super::xml_list_object::{E4XOrXml, XmlOrXmlListObject};
 use super::PrimitiveObject;
@@ -26,11 +26,11 @@ pub fn xml_allocator<'gc>(
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
-    Ok(XmlObject(GcCell::new(
+    Ok(XmlObject(Gc::new(
         activation.context.gc_context,
         XmlObjectData {
             base,
-            node: E4XNode::dummy(activation.context.gc_context),
+            node: Lock::new(E4XNode::dummy(activation.context.gc_context)),
         },
     ))
     .into())
@@ -38,36 +38,41 @@ pub fn xml_allocator<'gc>(
 
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
-pub struct XmlObject<'gc>(pub GcCell<'gc, XmlObjectData<'gc>>);
+pub struct XmlObject<'gc>(pub Gc<'gc, XmlObjectData<'gc>>);
 
 #[derive(Clone, Collect, Copy, Debug)]
 #[collect(no_drop)]
-pub struct XmlObjectWeak<'gc>(pub GcWeakCell<'gc, XmlObjectData<'gc>>);
+pub struct XmlObjectWeak<'gc>(pub GcWeak<'gc, XmlObjectData<'gc>>);
 
 impl fmt::Debug for XmlObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("XmlObject")
-            .field("ptr", &self.0.as_ptr())
+            .field("ptr", &Gc::as_ptr(self.0))
             .finish()
     }
 }
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
+#[repr(C, align(8))]
 pub struct XmlObjectData<'gc> {
     /// Base script object
     base: ScriptObjectData<'gc>,
 
-    node: E4XNode<'gc>,
+    node: Lock<E4XNode<'gc>>,
 }
+
+const _: () = assert!(std::mem::offset_of!(XmlObjectData, base) == 0);
+const _: () =
+    assert!(std::mem::align_of::<XmlObjectData>() == std::mem::align_of::<ScriptObjectData>());
 
 impl<'gc> XmlObject<'gc> {
     pub fn new(node: E4XNode<'gc>, activation: &mut Activation<'_, 'gc>) -> Self {
-        XmlObject(GcCell::new(
+        XmlObject(Gc::new(
             activation.context.gc_context,
             XmlObjectData {
                 base: ScriptObjectData::new(activation.context.avm2.classes().xml),
-                node,
+                node: Lock::new(node),
             },
         ))
     }
@@ -90,7 +95,7 @@ impl<'gc> XmlObject<'gc> {
 
                     if list.length() > 0 {
                         // NOTE: Since avmplus uses appendNode here, when the node exists, that implicitly sets the target_dirty flag.
-                        list.set_dirty_flag(activation.gc());
+                        list.set_dirty_flag();
                     }
 
                     return list;
@@ -140,7 +145,7 @@ impl<'gc> XmlObject<'gc> {
 
         if list.length() > 0 {
             // NOTE: Since avmplus uses appendNode to build the list here, we need to set target dirty flag.
-            list.set_dirty_flag(activation.gc());
+            list.set_dirty_flag();
         }
 
         list
@@ -151,11 +156,11 @@ impl<'gc> XmlObject<'gc> {
     }
 
     pub fn set_node(&self, mc: &Mutation<'gc>, node: E4XNode<'gc>) {
-        self.0.write(mc).node = node;
+        unlock!(Gc::write(mc, self.0), XmlObjectData, node).set(node);
     }
 
     pub fn local_name(&self) -> Option<AvmString<'gc>> {
-        self.0.read().node.local_name()
+        self.0.node.get().local_name()
     }
 
     pub fn namespace_object(
@@ -163,36 +168,17 @@ impl<'gc> XmlObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
         in_scope_ns: &[E4XNamespace<'gc>],
     ) -> Result<NamespaceObject<'gc>, Error<'gc>> {
-        // 13.3.5.4 [[GetNamespace]] ( [ InScopeNamespaces ] )
-        // 1. If q.uri is null, throw a TypeError exception
-        // NOTE: As stated in the spec, this not really possible
-        match self.0.read().node.namespace() {
-            None => E4XNamespace::default_namespace(),
-            Some(ns) => {
-                // 2. If InScopeNamespaces was not specified, let InScopeNamespaces = { }
-                // 3. Find a Namespace ns in InScopeNamespaces, such that ns.uri == q.uri. If more than one such
-                //    Namespace ns exists, the implementation may choose one of the matching Namespaces arbitrarily.
-                // NOTE: Flash just uses whatever namespace URI matches first. They don't do anything with the prefix.
-                if let Some(ns) = in_scope_ns.iter().find(|scope_ns| scope_ns.uri == ns.uri) {
-                    *ns
-                } else {
-                    // 4. If no such namespace ns exists
-                    //      a. Let ns be a new namespace created as if by calling the constructor new Namespace(q.uri)
-                    // NOTE: We could preserve the prefix here, but Flash doesn't bother.
-                    E4XNamespace::new_uri(ns.uri)
-                }
-            }
-        }
-        // 5. Return ns
-        .as_namespace_object(activation)
+        self.node()
+            .get_namespace(in_scope_ns)
+            .as_namespace_object(activation)
     }
 
     pub fn matches_name(&self, multiname: &Multiname<'gc>) -> bool {
-        self.0.read().node.matches_name(multiname)
+        self.0.node.get().matches_name(multiname)
     }
 
-    pub fn node(&self) -> Ref<'_, E4XNode<'gc>> {
-        Ref::map(self.0.read(), |data| &data.node)
+    pub fn node(&self) -> E4XNode<'gc> {
+        self.0.node.get()
     }
 
     pub fn deep_copy(&self, activation: &mut Activation<'_, 'gc>) -> XmlObject<'gc> {
@@ -265,16 +251,16 @@ impl<'gc> XmlObject<'gc> {
 }
 
 impl<'gc> TObject<'gc> for XmlObject<'gc> {
-    fn base(&self) -> Ref<ScriptObjectData<'gc>> {
-        Ref::map(self.0.read(), |read| &read.base)
-    }
+    fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
+        // SAFETY: Object data is repr(C), and a compile-time assert ensures
+        // that the ScriptObjectData stays at offset 0 of the struct- so the
+        // layouts are compatible
 
-    fn base_mut(&self, mc: &Mutation<'gc>) -> RefMut<ScriptObjectData<'gc>> {
-        RefMut::map(self.0.write(mc), |write| &mut write.base)
+        unsafe { Gc::cast(self.0) }
     }
 
     fn as_ptr(&self) -> *const ObjectPtr {
-        self.0.as_ptr() as *const ObjectPtr
+        Gc::as_ptr(self.0) as *const ObjectPtr
     }
 
     fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
@@ -291,13 +277,13 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         multiname: &Multiname<'gc>,
     ) -> Option<XmlListObject<'gc>> {
         let mut descendants = Vec::new();
-        self.0.read().node.descendants(multiname, &mut descendants);
+        self.0.node.get().descendants(multiname, &mut descendants);
 
         let list = XmlListObject::new_with_children(activation, descendants, None, None);
         // NOTE: avmplus does not set a target property/object here, but if there was at least one child
         //       then the target_dirty flag would be set, since avmplus used appendNode which always sets it.
         if list.length() > 0 {
-            list.set_dirty_flag(activation.gc());
+            list.set_dirty_flag();
         }
 
         Some(list)
@@ -309,7 +295,6 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         // FIXME - implement everything from E4X spec (XMLObject::getMultinameProperty in avmplus)
-        let read = self.0.read();
 
         if !name.has_explicit_namespace() {
             if let Some(local_name) = name.local_name() {
@@ -330,7 +315,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
             children,
             attributes,
             ..
-        } = &*read.node.kind()
+        } = &*self.0.node.get().kind()
         {
             let search_children = if name.is_attribute() {
                 attributes
@@ -362,7 +347,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         );
 
         if list.length() > 0 {
-            list.set_dirty_flag(activation.gc());
+            list.set_dirty_flag();
         }
 
         Ok(list.into())
@@ -412,7 +397,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
             return true;
         }
 
-        self.0.read().base.has_own_dynamic_property(name)
+        self.base().has_own_dynamic_property(name)
     }
 
     fn has_property_via_in(
@@ -526,10 +511,11 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
             let Some(local_name) = name.local_name() else {
                 return Err(format!("Cannot set attribute {:?} without a local name", name).into());
             };
-            let new_attr = E4XNode::attribute(mc, local_name, value, Some(*self.node()));
+            let ns = name.explicit_namespace().map(E4XNamespace::new_uri);
+            let new_attr = E4XNode::attribute(mc, ns, local_name, value, Some(self.node()));
 
-            let write = self.0.write(mc);
-            let mut kind = write.node.kind_mut(mc);
+            let node = self.0.node.get();
+            let mut kind = node.kind_mut(mc);
             let E4XNodeKind::Element { attributes, .. } = &mut *kind else {
                 return Ok(());
             };
@@ -581,7 +567,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
                     activation.gc(),
                     name.explicit_namespace().map(E4XNamespace::new_uri),
                     name.local_name().unwrap(),
-                    Some(*self_node),
+                    Some(self_node),
                 );
                 // 12.b.v. Call the [[Replace]] method of x with arguments ToString(i) and y
                 self_node.replace(index, XmlObject::new(node, activation).into(), activation)?;
@@ -651,6 +637,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         }
     }
 
+    // ECMA-357 9.1.1.3 [[Delete]] (P)
     fn delete_property_local(
         self,
         activation: &mut Activation<'_, 'gc>,
@@ -658,40 +645,71 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
     ) -> Result<bool, Error<'gc>> {
         let name = handle_input_multiname(name.clone(), activation);
 
-        if name.has_explicit_namespace() {
-            return Err(format!(
-                "Can not set property {:?} with an explicit namespace yet",
-                name
-            )
-            .into());
+        // 1. If ToString(ToUint32(P)) == P, throw a TypeError exception
+        // NOTE: This doesn't actually throw in Flash.
+        if let Some(local_name) = name.local_name() {
+            if local_name.parse::<usize>().is_ok() {
+                return Ok(true);
+            }
         }
 
-        let mc = activation.context.gc_context;
-        let write = self.0.write(mc);
-        let mut kind = write.node.kind_mut(mc);
-        let E4XNodeKind::Element {
-            children,
-            attributes,
-            ..
-        } = &mut *kind
-        else {
-            return Ok(false);
+        let node = self.0.node.get();
+
+        // 2. Let n = ToXMLName(P)
+
+        // 3. If Type(n) is AttributeName
+        if name.is_attribute() {
+            let E4XNodeKind::Element { attributes, .. } = &mut *node.kind_mut(activation.gc())
+            else {
+                return Ok(true);
+            };
+
+            // 3.a. For each a in x.[[Attributes]]
+            attributes.retain(|attr| {
+                // 3.a.i. If ((n.[[Name]].localName == "*") or
+                //            (n.[[Name]].localName == a.[[Name]].localName))
+                // and ((n.[[Name]].uri == null) or (n.[[Name]].uri == a.[[Name]].uri))
+                if attr.matches_name(&name) {
+                    // 3.a.i.1. Let a.[[Parent]] = null
+                    attr.set_parent(None, activation.gc());
+                    // 3.a.i.2. Remove the attribute a from x.[[Attributes]]
+                    false
+                } else {
+                    true
+                }
+            });
+
+            // 3.b. Return true
+            return Ok(true);
+        }
+
+        let E4XNodeKind::Element { children, .. } = &mut *node.kind_mut(activation.gc()) else {
+            return Ok(true);
         };
 
-        let retain_non_matching = |node: &E4XNode<'gc>| {
-            if node.matches_name(&name) {
-                node.set_parent(None, mc);
+        // 4. Let dp = 0
+        // 5. For q = 0 to x.[[Length]]-1
+        children.retain(|child| {
+            // 5.a. If ((n.localName == "*")
+            //   or (x[q].[[Class]] == "element" and x[q].[[Name]].localName == n.localName))
+            //   and ((n.uri == null) or (x[q].[[Class]] == “element” and n.uri == x[q].[[Name]].uri ))
+            let should_retain = if name.is_any_name() {
                 false
+            } else if child.is_element() {
+                !child.matches_name(&name)
             } else {
                 true
-            }
-        };
+            };
 
-        if name.is_attribute() {
-            attributes.retain(retain_non_matching);
-        } else {
-            children.retain(retain_non_matching);
-        }
+            if !should_retain {
+                child.set_parent(None, activation.gc());
+            }
+
+            should_retain
+        });
+
+        // 6. Let x.[[Length]] = x.[[Length]] - dp
+        // 7. Return true.
         Ok(true)
     }
 }
@@ -702,6 +720,9 @@ fn handle_input_multiname<'gc>(
 ) -> Multiname<'gc> {
     // Special case to handle code like: xml["@attr"]
     // FIXME: Figure out the exact semantics.
+    // NOTE: It is very important the code within the if-statement is not run
+    // when the passed name has the Any namespace. Otherwise, we run the risk of
+    // creating a NamespaceSet::Multiple with an Any namespace in it.
     if !name.has_explicit_namespace()
         && !name.is_attribute()
         && !name.is_any_name()
@@ -717,7 +738,7 @@ fn handle_input_multiname<'gc>(
                 let mut ns = Vec::new();
                 ns.extend(name.namespace_set());
                 if !name.contains_public_namespace() {
-                    ns.push(activation.avm2().public_namespace_base_version);
+                    ns.push(activation.avm2().namespaces.public_all());
                 }
                 new_name.set_ns(NamespaceSet::new(ns, activation.gc()));
             }

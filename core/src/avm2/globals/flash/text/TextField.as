@@ -153,10 +153,7 @@ package flash.text {
             return new Rectangle(0, 0, 1, 1);
         }
 
-        public function getFirstCharInParagraph(charIndex:int):int {
-            stub_method("flash.text.TextField", "getFirstCharInParagraph");
-            return 0;
-        }
+        public native function getFirstCharInParagraph(charIndex:int):int;
 
         public function getImageReference(id:String):DisplayObject {
             stub_method("flash.text.TextField", "getImageReference");
@@ -167,16 +164,14 @@ package flash.text {
 
         public native function getLineIndexOfChar(charIndex:int):int;
 
-        public function getParagraphLength(charIndex:int):int {
-            stub_method("flash.text.TextField", "getParagraphLength");
-            return 0;
-        }
+        public native function getParagraphLength(charIndex:int):int;
 
         public static function isFontCompatible(fontName:String, fontStyle:String):Boolean {
             stub_method("flash.text.TextField", "isFontCompatible");
             return true;
         }
 
+        [API("670")]
         public function get textInteractionMode():String {
             stub_getter("flash.text.TextField", "textInteractionMode");
             return TextInteractionMode.NORMAL;

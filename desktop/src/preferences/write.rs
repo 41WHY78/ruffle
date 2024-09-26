@@ -1,16 +1,24 @@
+use crate::gui::ThemePreference;
 use crate::log::FilenamePattern;
 use crate::preferences::storage::StorageBackend;
-use crate::preferences::SavedGlobalPreferences;
+use crate::preferences::{GlobalPreferencesWatchers, SavedGlobalPreferences};
 use ruffle_frontend_utils::parse::DocumentHolder;
 use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
 use toml_edit::value;
 use unic_langid::LanguageIdentifier;
 
-pub struct PreferencesWriter<'a>(&'a mut DocumentHolder<SavedGlobalPreferences>);
+pub struct PreferencesWriter<'a>(
+    &'a mut DocumentHolder<SavedGlobalPreferences>,
+    Option<&'a GlobalPreferencesWatchers>,
+);
 
 impl<'a> PreferencesWriter<'a> {
     pub(super) fn new(preferences: &'a mut DocumentHolder<SavedGlobalPreferences>) -> Self {
-        Self(preferences)
+        Self(preferences, None)
+    }
+
+    pub(super) fn set_watchers(&mut self, watchers: &'a GlobalPreferencesWatchers) {
+        self.1 = Some(watchers);
     }
 
     pub fn set_graphics_backend(&mut self, backend: GraphicsBackend) {
@@ -85,6 +93,20 @@ impl<'a> PreferencesWriter<'a> {
             toml_document["recent_limit"] = value(limit as i64);
             values.recent_limit = limit;
         })
+    }
+
+    pub fn set_theme_preference(&mut self, theme_preference: ThemePreference) {
+        self.0.edit(|values, toml_document| {
+            if let Some(theme_preference) = theme_preference.as_str() {
+                toml_document["theme"] = value(theme_preference);
+            } else {
+                toml_document.remove("theme");
+            }
+            values.theme_preference = theme_preference;
+        });
+        if let Some(watcher) = self.1.map(|w| &w.theme_preference_watcher) {
+            let _ = watcher.send(theme_preference);
+        }
     }
 }
 
@@ -238,6 +260,20 @@ mod tests {
             "recent_limit = 5",
             |writer| writer.set_recent_limit(15),
             "recent_limit = 15\n",
+        );
+    }
+
+    #[test]
+    fn set_theme() {
+        test(
+            "theme = 6\n",
+            |writer| writer.set_theme_preference(ThemePreference::Dark),
+            "theme = \"dark\"\n",
+        );
+        test(
+            "theme = \"dark\"",
+            |writer| writer.set_theme_preference(ThemePreference::System),
+            "",
         );
     }
 }

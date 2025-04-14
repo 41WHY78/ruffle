@@ -452,7 +452,7 @@ var swfobject = function() {
             //Add params
             for (param in parObj) {
                 //filter out prototype additions from other potential libraries and IE specific param element
-                if (parObj.hasOwnProperty(param) && param.toLowerCase() !== "movie") {
+                if (Object.prototype.hasOwnProperty.call(parObj, param) && param.toLowerCase() !== "movie") {
                     createObjParam(o, param, parObj[param]);
                 }
             }
@@ -462,7 +462,7 @@ var swfobject = function() {
 
             //Add attributes to object
             for (attr in attObj) {
-                if (attObj.hasOwnProperty(attr)) { // filter out prototype additions from other potential libraries
+                if (Object.prototype.hasOwnProperty.call(attObj, attr)) { // filter out prototype additions from other potential libraries
 
                     attr_lower = attr.toLowerCase();
 
@@ -712,7 +712,7 @@ var swfobject = function() {
                     }
                     if (flashvarsObj && typeof flashvarsObj === OBJECT) {
                         for (var k in flashvarsObj) { // copy object to avoid the use of references, because web authors often reuse flashvarsObj for multiple SWFs
-                            if(flashvarsObj.hasOwnProperty(k)){
+                            if(Object.prototype.hasOwnProperty.call(flashvarsObj, k)){
 
                                 var key = (encodeURI_enabled) ? encodeURIComponent(k) : k,
                                     value = (encodeURI_enabled) ? encodeURIComponent(flashvarsObj[k]) : flashvarsObj[k];

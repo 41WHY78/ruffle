@@ -2,7 +2,7 @@
     is released under the MIT License <http://www.opensource.org/licenses/mit-license.php>
 */
 
-var swfobject = function() {
+var swfobject = (function() {
 
     var UNDEF = "undefined",
         OBJECT = "object",
@@ -36,7 +36,7 @@ var swfobject = function() {
         - User agent string detection is only used when no good alternative is possible
         - Is executed directly for optimal performance
     */
-    ua = function() {
+    ua = (function() {
         var w3cdom = typeof doc.getElementById != UNDEF && typeof doc.getElementsByTagName != UNDEF && typeof doc.createElement != UNDEF,
             u = nav.userAgent.toLowerCase(),
             p = nav.platform.toLowerCase(),
@@ -73,14 +73,14 @@ var swfobject = function() {
             catch(e) {}
         }
         return { w3:w3cdom, pv:playerVersion, wk:webkit, ie:ie, win:windows, mac:mac };
-    }(),
+    }()),
 
     /* Cross-browser onDomLoad
         - Will fire an event as soon as the DOM of a web page is loaded
         - Internet Explorer workaround based on Diego Perini's solution: http://javascript.nwbox.com/IEContentLoaded/
         - Regular onload serves as fallback
     */
-    onDomLoad = function() {
+    onDomLoad = (function() {
         if (!ua.w3) { return; }
         if ((typeof doc.readyState != UNDEF && (doc.readyState === "complete" || doc.readyState === "interactive")) || (typeof doc.readyState == UNDEF && (doc.getElementsByTagName("body")[0] || doc.body))) { // function is fired after onload, e.g. when script is inserted dynamically
             callDomLoadFunctions();
@@ -121,7 +121,7 @@ var swfobject = function() {
                 }());
             }
         }
-    }();
+    }());
 
     function callDomLoadFunctions() {
         if (isDomLoaded || !document.getElementsByTagName("body")[0]) { return; }
@@ -634,7 +634,7 @@ var swfobject = function() {
 
     /* Release memory to avoid memory leaks caused by closures, fix hanging audio/video threads and force open sockets/NetConnections to disconnect (Internet Explorer only)
     */
-    var cleanup = function() {
+    var cleanup = (function() {
         if (ua.ie) {
             window.attachEvent("onunload", function() {
                 // remove listeners to avoid memory leaks
@@ -658,7 +658,7 @@ var swfobject = function() {
                 swfobject = null;
             });
         }
-    }();
+    }());
 
     return {
         /* Public API
@@ -833,4 +833,4 @@ var swfobject = function() {
 		version: "2.3"
 
     };
-}();
+}());
